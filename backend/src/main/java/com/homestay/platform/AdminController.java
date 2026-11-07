@@ -52,7 +52,10 @@ public class AdminController {
   public Map<String,Object> roomStatus(@RequestHeader(value="Authorization", required=false) String authorization, @PathVariable Long id, @RequestParam String status) { guard(authorization); jdbc.update("UPDATE room SET status=? WHERE id=?", status, id); return Map.of("code","0","message","房态已更新"); }
 
   private void guard(String authorization) {
-    if (authorization == null || !authorization.startsWith("Bearer ") || redis.opsForValue().get("homestay:session:" + authorization.substring(7)) == null)
-      throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "请先登录管理端");
+    if (authorization == null || !authorization.startsWith("Bearer ")) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "请先登录管理端");
+    String userId = redis.opsForValue().get("homestay:session:" + authorization.substring(7));
+    if (userId == null) throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "登录已过期");
+    String role = jdbc.queryForObject("SELECT role_code FROM sys_user WHERE id=?", String.class, userId);
+    if (role == null || !(role.equals("SUPER_ADMIN") || role.equals("MANAGER") || role.equals("RECEPTIONIST"))) throw new ResponseStatusException(HttpStatus.FORBIDDEN, "没有管理权限");
   }
 }

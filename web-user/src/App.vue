@@ -7,11 +7,16 @@ const checkIn = ref('2026-11-14')
 const checkOut = ref('2026-11-16')
 const guests = ref(2)
 const toast = ref('')
+const bookingOpen = ref(false)
+const bookingRoom = ref(null)
+const bookingForm = ref({ name: '', phone: '', guests: 2 })
+const bookingResult = ref(null)
+const orders = ref([])
 
 const fallbackRooms = [
-  { name: '松风大床房', type: '山景 · 1 张大床', price: 688, tag: '最受欢迎', image: '/assets/room-warm.svg' },
-  { name: '云岚双床房', type: '溪景 · 2 张单人床', price: 758, tag: '适合朋友', image: '/assets/room-stream.svg' },
-  { name: '栖迟整栋小院', type: '庭院 · 3 室 1 厅', price: 2280, tag: '整栋包院', image: '/assets/courtyard.svg' }
+  { id: 1, name: '松风大床房', type: '山景 · 1 张大床', price: 688, tag: '最受欢迎', image: '/assets/room-warm.svg' },
+  { id: 2, name: '云岚双床房', type: '溪景 · 2 张单人床', price: 758, tag: '适合朋友', image: '/assets/room-stream.svg' },
+  { id: 3, name: '栖迟整栋小院', type: '庭院 · 3 室 1 厅', price: 2280, tag: '整栋包院', image: '/assets/courtyard.svg' }
 ]
 const rooms = ref(fallbackRooms)
 const filters = ['全部', '山景房', '溪景房', '整栋包院']
@@ -24,6 +29,7 @@ onMounted(async () => {
     if (Array.isArray(payload.data) && payload.data.length) {
       rooms.value = payload.data.map((room) => ({
         name: room.name,
+        id: room.id,
         type: room.description || room.bedType,
         price: Number(room.price),
         tag: room.availableCount > 0 ? '可立即预订' : '即将满房',
@@ -36,9 +42,22 @@ function searchRooms() {
   toast.value = `已为你查找 ${checkIn.value} 至 ${checkOut.value} 的房源`
   window.setTimeout(() => { toast.value = '' }, 3000)
 }
-function reserve(room) {
-  toast.value = `已选择「${room.name}」，接下来填写入住信息`
-  window.setTimeout(() => { toast.value = '' }, 3000)
+function reserve(room) { bookingRoom.value = room; bookingForm.value = { name: '', phone: '', guests: guests.value }; bookingResult.value = null; bookingOpen.value = true }
+async function createBooking() {
+  const nights = Math.max(1, Math.round((new Date(checkOut.value) - new Date(checkIn.value)) / 86400000))
+  const payload = { checkIn: checkIn.value, checkOut: checkOut.value, guests: bookingForm.value.guests, contactName: bookingForm.value.name, contactPhone: bookingForm.value.phone, items: [{ roomTypeId: bookingRoom.value.id, quantity: 1 }] }
+  try {
+    const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1'}/reservations`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `${Date.now()}-${bookingRoom.value.id}` }, body: JSON.stringify(payload) })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.message || '下单失败')
+    bookingResult.value = { ...data.data, nights }
+    orders.value.unshift({ ...data.data, roomName: bookingRoom.value.name })
+  } catch (error) { toast.value = error.message; window.setTimeout(() => { toast.value = '' }, 3000) }
+}
+async function simulatePay(result = 'success') {
+  const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1'}/reservations/${bookingResult.value.orderNo}/pay?result=${result}`, { method: 'POST' })
+  const data = await response.json(); bookingResult.value.status = data.data.status
+  const order = orders.value.find(item => item.orderNo === bookingResult.value.orderNo); if (order) order.status = data.data.status
 }
 </script>
 
@@ -96,6 +115,7 @@ function reserve(room) {
     </main>
 
     <footer id="orders" class="footer"><div class="footer-brand"><span class="brand-mark">栖</span><p>把日子住进风景里。<br /><small>MADE FOR SLOW DAYS.</small></p></div><div class="footer-links"><div><strong>探索</strong><a href="#rooms">精选房型</a><a href="#story">关于栖野</a><a href="#journal">山野手记</a></div><div><strong>联系</strong><span>浙江省湖州市德清县</span><span>hello@qiye-stay.com</span><span>+86 572 806 8899</span></div></div><div class="footer-bottom"><span>© 2026 QIYE HOMESTAY</span><span>隐私政策 · 预订须知</span></div></footer>
+    <div v-if="bookingOpen" class="booking-overlay"><form class="booking-modal" @submit.prevent="createBooking"><button class="modal-close" type="button" aria-label="关闭" @click="bookingOpen = false">×</button><p class="eyebrow">YOUR STAY</p><h2>{{ bookingResult ? '订单已创建' : `预订 ${bookingRoom?.name}` }}</h2><div v-if="!bookingResult"><p class="booking-dates">{{ checkIn }} — {{ checkOut }} · {{ guests }} 位成人</p><label>联系人姓名<input v-model="bookingForm.name" autocomplete="name" required></label><label>联系电话<input v-model="bookingForm.phone" type="tel" autocomplete="tel" required pattern="[0-9+ -]{6,}"></label><button class="modal-submit" type="submit">确认预订 <span>→</span></button></div><div v-else class="booking-success"><strong>{{ bookingResult.orderNo }}</strong><p>共 {{ bookingResult.nights }} 晚 · ¥{{ bookingResult.total }}</p><div class="pay-actions"><button type="button" @click="simulatePay('success')">模拟支付成功</button><button type="button" class="secondary" @click="simulatePay('failure')">模拟支付失败</button></div><p class="status-line">当前状态：{{ bookingResult.status === 'CONFIRMED' ? '已确认' : '待支付' }}</p></div></form></div>
     <Transition name="toast"><div v-if="toast" class="toast" role="status" aria-live="polite">{{ toast }}</div></Transition>
   </div>
 </template>
