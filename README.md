@@ -49,7 +49,7 @@
 homestay-platform/
 ├─ backend/        # Spring Boot + Redis/MySQL 后端
 ├─ web-user/       # Vue 3 用户端（移动优先）
-├─ web-admin/      # 运营管理端（待初始化）
+├─ web-admin/      # Vue 3 运营管理端（基础看板与房型列表）
 ├─ deploy/         # Docker Compose、MySQL、Redis
 └─ docs/           # 设计文档与接口契约
 ```
@@ -63,6 +63,16 @@ npm run dev
 ```
 
 用户端默认地址为 `http://localhost:5173`。后端需要 Java 21 和 Maven；基础服务可以使用 `docker compose -f deploy/docker-compose.yml up` 启动 MySQL、Redis 和后端容器。
+
+管理端在另一个终端启动：
+
+```bash
+cd web-admin
+npm install
+npm run dev
+```
+
+管理端默认地址为 `http://localhost:5174`。首次使用可先调用 `/api/v1/auth/register` 注册账号，再从管理端登录。
 
 ## 里程碑（详见文档第 22 章）
 
