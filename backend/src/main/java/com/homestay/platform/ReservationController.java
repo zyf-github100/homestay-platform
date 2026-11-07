@@ -3,34 +3,51 @@ package com.homestay.platform;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.Size;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api/v1/reservations")
 public class ReservationController {
-  private final JdbcTemplate jdbc; private final StringRedisTemplate redis;
-  public ReservationController(JdbcTemplate jdbc, StringRedisTemplate redis) { this.jdbc = jdbc; this.redis = redis; }
-  public record Item(@NotNull Long roomTypeId, @NotNull Integer quantity) {}
-  public record CreateRequest(@NotNull LocalDate checkIn, @NotNull LocalDate checkOut, @NotNull Integer guests, @NotBlank String contactName, @NotBlank String contactPhone, @NotNull List<Item> items) {}
+  private final JdbcTemplate jdbc; private final StringRedisTemplate redis; private final SessionService session; private final PaymentService payments;
+  private final AuditService audit;
+  public ReservationController(JdbcTemplate jdbc, StringRedisTemplate redis, SessionService session, PaymentService payments) { this(jdbc, redis, session, payments, null); }
+  @Autowired
+  public ReservationController(JdbcTemplate jdbc, StringRedisTemplate redis, SessionService session, PaymentService payments, AuditService audit) { this.jdbc = jdbc; this.redis = redis; this.session = session; this.payments = payments; this.audit = audit; }
+  public record Item(@NotNull Long roomTypeId, @NotNull @Positive Integer quantity) {}
+  public record CreateRequest(@NotNull LocalDate checkIn, @NotNull LocalDate checkOut, @NotNull @Positive Integer guests, @NotBlank String contactName, @NotBlank String contactPhone, @NotNull @Size(min = 1) List<@Valid Item> items) {}
 
   @PostMapping("/price-check")
   public Map<String,Object> price(@Valid @RequestBody CreateRequest body) { return Map.of("code","0","message","success","data", calculate(body)); }
 
   @PostMapping
-  public Map<String,Object> create(@Valid @RequestBody CreateRequest body, @RequestHeader(value="Idempotency-Key", required=false) String idempotencyKey) {
-    if (!body.checkOut().isAfter(body.checkIn())) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "离店日期必须晚于入住日期");
-    if (idempotencyKey != null) { String existing = redis.opsForValue().get("homestay:idempotency:reservation:" + idempotencyKey); if (existing != null) return Map.of("code","0","message","订单已创建","data",Map.of("orderNo",existing)); }
-    var pricing = calculate(body); String orderNo = "QY" + System.currentTimeMillis(); long nights = ChronoUnit.DAYS.between(body.checkIn(), body.checkOut());
-    List<Long> locked = new ArrayList<>();
+  @Transactional
+  public Map<String,Object> create(@Valid @RequestBody CreateRequest body, @RequestHeader(value="Authorization", required=false) String authorization, @RequestHeader(value="Idempotency-Key", required=false) String idempotencyKey) {
+    SessionService.SessionUser user = session.requirePermission(authorization, "reservation:create");
+    validateDates(body);
+    if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+      String existing = redis.opsForValue().get("homestay:idempotency:reservation:" + idempotencyKey);
+      if (existing != null) {
+        Integer owned = jdbc.queryForObject("SELECT COUNT(*) FROM reservation WHERE order_no=? AND user_id=?", Integer.class, existing, user.id());
+        if (owned != null && owned > 0) return Map.of("code","0","message","订单已创建","data",Map.of("orderNo",existing));
+        redis.delete("homestay:idempotency:reservation:" + idempotencyKey);
+      }
+    }
+    var pricing = calculate(body); String orderNo = "QY" + UUID.randomUUID().toString().replace("-", "").substring(0, 20); long nights = ChronoUnit.DAYS.between(body.checkIn(), body.checkOut());
+    List<String> lockedKeys = new ArrayList<>();
     try {
+      jdbc.update("DELETE FROM inventory_lock WHERE expires_at <= NOW()");
       for (Item item : body.items()) {
         List<Long> rooms = jdbc.queryForList("SELECT r.id FROM room r WHERE r.room_type_id=? AND r.status='AVAILABLE' AND NOT EXISTS (SELECT 1 FROM inventory_lock l WHERE l.room_id=r.id AND l.stay_date>=? AND l.stay_date<?) LIMIT ?", Long.class, item.roomTypeId(), body.checkIn(), body.checkOut(), item.quantity());
         if (rooms.size() < item.quantity()) throw new ResponseStatusException(HttpStatus.CONFLICT, "库存不足");
@@ -38,23 +55,58 @@ public class ReservationController {
           String key = "homestay:inventory-lock:" + roomId + ":" + date;
           Boolean acquired = redis.opsForValue().setIfAbsent(key, orderNo, java.time.Duration.ofMinutes(15));
           if (!Boolean.TRUE.equals(acquired)) throw new ResponseStatusException(HttpStatus.CONFLICT, "库存正在被其他订单锁定");
-          jdbc.update("INSERT INTO inventory_lock(room_id,stay_date,order_no,expires_at) VALUES(?,?,?,DATE_ADD(NOW(), INTERVAL 15 MINUTE))", roomId, date, orderNo); locked.add(roomId);
+          lockedKeys.add(key);
+          jdbc.update("INSERT INTO inventory_lock(room_id,stay_date,order_no,expires_at) VALUES(?,?,?,DATE_ADD(NOW(), INTERVAL 15 MINUTE))", roomId, date, orderNo);
         }
       }
-      jdbc.update("INSERT INTO reservation(order_no,contact_name,contact_phone,check_in,check_out,guests,room_count,total_amount) VALUES(?,?,?,?,?,?,?,?)", orderNo, body.contactName(), body.contactPhone(), body.checkIn(), body.checkOut(), body.guests(), body.items().stream().mapToInt(Item::quantity).sum(), pricing.get("total"));
+      jdbc.update("INSERT INTO reservation(order_no,user_id,contact_name,contact_phone,check_in,check_out,guests,room_count,total_amount) VALUES(?,?,?,?,?,?,?,?,?)", orderNo, user.id(), body.contactName(), body.contactPhone(), body.checkIn(), body.checkOut(), body.guests(), body.items().stream().mapToInt(Item::quantity).sum(), pricing.get("total"));
       Long reservationId = jdbc.queryForObject("SELECT id FROM reservation WHERE order_no=?", Long.class, orderNo);
       for (Item item : body.items()) { BigDecimal unit = jdbc.queryForObject("SELECT base_price FROM room_type WHERE id=?", BigDecimal.class, item.roomTypeId()); jdbc.update("INSERT INTO reservation_item(reservation_id,room_type_id,quantity,unit_price,nights) VALUES(?,?,?,?,?)", reservationId, item.roomTypeId(), item.quantity(), unit, nights); }
       if (idempotencyKey != null) redis.opsForValue().set("homestay:idempotency:reservation:" + idempotencyKey, orderNo, java.time.Duration.ofHours(24));
+      if (audit != null) audit.record(user.id(), "RESERVATION_CREATE", "RESERVATION", orderNo, "SUCCESS", "创建订单");
       return Map.of("code","0","message","订单创建成功","data",Map.of("orderNo",orderNo,"total",pricing.get("total"),"status","PENDING_PAYMENT"));
-    } catch (RuntimeException ex) { for (Long roomId : locked) { /* DB cleanup is handled by expiry/reconciliation */ } throw ex; }
+    } catch (RuntimeException ex) {
+      for (String key : lockedKeys) {
+        if (orderNo.equals(redis.opsForValue().get(key))) redis.delete(key);
+      }
+      throw ex;
+    }
   }
 
   @GetMapping
-  public Map<String,Object> list() { return Map.of("code","0","message","success","data",jdbc.queryForList("SELECT order_no orderNo, contact_name contactName, check_in checkIn, check_out checkOut, room_count roomCount, total_amount total, status, payment_status paymentStatus, created_at createdAt FROM reservation ORDER BY id DESC")); }
+  public Map<String,Object> list(@RequestHeader(value="Authorization", required=false) String authorization) {
+    SessionService.SessionUser user = session.requirePermission(authorization, "reservation:view:self");
+    return Map.of("code","0","message","success","data",jdbc.queryForList("SELECT order_no orderNo, contact_name contactName, check_in checkIn, check_out checkOut, room_count roomCount, total_amount total, status, payment_status paymentStatus, created_at createdAt FROM reservation WHERE user_id=? ORDER BY id DESC", user.id()));
+  }
+
+  @GetMapping("/{orderNo}")
+  public Map<String, Object> detail(@PathVariable String orderNo,
+      @RequestHeader(value = "Authorization", required = false) String authorization) {
+    SessionService.SessionUser user = session.requirePermission(authorization, "reservation:view:self");
+    List<Map<String, Object>> orders = jdbc.queryForList("SELECT id, order_no orderNo, contact_name contactName, contact_phone contactPhone, check_in checkIn, check_out checkOut, guests, room_count roomCount, total_amount total, status, payment_status paymentStatus, created_at createdAt FROM reservation WHERE order_no=? AND user_id=?", orderNo, user.id());
+    if (orders.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "订单不存在");
+    Map<String, Object> data = new LinkedHashMap<>(orders.getFirst());
+    data.put("items", jdbc.queryForList("SELECT ri.id, rt.name roomTypeName, ri.quantity, ri.unit_price unitPrice, ri.nights FROM reservation_item ri JOIN room_type rt ON rt.id=ri.room_type_id WHERE ri.reservation_id=? ORDER BY ri.id", data.get("id")));
+    data.put("rooms", jdbc.queryForList("SELECT rr.id reservationRoomId, r.room_no roomNo, r.room_type_id roomTypeId, rr.status, rr.assigned_at assignedAt, rr.check_in_at checkInAt, rr.check_out_at checkOutAt FROM reservation_room rr JOIN room r ON r.id=rr.room_id WHERE rr.reservation_id=? ORDER BY rr.id", data.get("id")));
+    data.put("payments", jdbc.queryForList("SELECT payment_no paymentNo, amount, method, status, paid_at paidAt FROM payment WHERE reservation_id=? ORDER BY id", data.get("id")));
+    return Map.of("code", "0", "message", "success", "data", data);
+  }
+
+  @PostMapping("/{orderNo}/cancel")
+  public Map<String, Object> cancel(
+      @PathVariable String orderNo,
+      @RequestHeader(value = "Authorization", required = false) String authorization) {
+    return payments.cancelReservation(orderNo, session.requirePermission(authorization, "reservation:cancel:self").id());
+  }
 
   private Map<String,Object> calculate(CreateRequest body) {
-    long nights = Math.max(1, ChronoUnit.DAYS.between(body.checkIn(), body.checkOut())); BigDecimal total = BigDecimal.ZERO;
+    validateDates(body);
+    long nights = ChronoUnit.DAYS.between(body.checkIn(), body.checkOut()); BigDecimal total = BigDecimal.ZERO;
     for (Item item : body.items()) { BigDecimal price = jdbc.queryForObject("SELECT base_price FROM room_type WHERE id=? AND status='PUBLISHED'", BigDecimal.class, item.roomTypeId()); if (price == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "房型不存在"); total = total.add(price.multiply(BigDecimal.valueOf(item.quantity())).multiply(BigDecimal.valueOf(nights))); }
     return Map.of("nights", nights, "total", total);
+  }
+
+  private void validateDates(CreateRequest body) {
+    if (!body.checkOut().isAfter(body.checkIn())) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "离店日期必须晚于入住日期");
   }
 }

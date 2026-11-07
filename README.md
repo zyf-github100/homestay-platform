@@ -72,7 +72,8 @@ npm install
 npm run dev
 ```
 
-管理端默认地址为 `http://localhost:5174`。首次使用可先调用 `/api/v1/auth/register` 注册账号，再从管理端登录。
+管理端默认地址为 `http://localhost:5174`。首次使用可先调用 `/api/v1/auth/register` 注册账号；管理端业务接口要求账号具有 `FRONT_DESK`、`OPERATION_ADMIN`、`ADMIN` 或 `SYSTEM_ADMIN` 角色，开发环境可在数据库中将账号的 `sys_user.role_code` 调整为其中一种角色后再登录。
+身份证加密使用 `GUEST_ID_ENCRYPTION_KEY` 配置 32 字节密钥；默认值只用于开发环境，部署时必须替换。
 
 ## 里程碑（详见文档第 22 章）
 
