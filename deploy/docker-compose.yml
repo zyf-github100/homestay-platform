@@ -2,33 +2,132 @@ services:
   mysql:
     image: mysql:8.4
     environment:
-      MYSQL_DATABASE: homestay
-      MYSQL_USER: homestay
-      MYSQL_PASSWORD: homestay
-      MYSQL_ROOT_PASSWORD: root
-    ports: ["3306:3306"]
-    volumes: ["mysql_data:/var/lib/mysql"]
+      MYSQL_DATABASE: ${DB_NAME:-homestay}
+      MYSQL_USER: ${DB_USERNAME:?DB_USERNAME is required}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
       interval: 5s
-      timeout: 3s
-      retries: 20
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
   redis:
     image: redis:7-alpine
-    ports: ["6379:6379"]
-    volumes: ["redis_data:/data"]
-    command: redis-server --appendonly yes
-  backend:
-    build: ../backend
     environment:
-      DB_URL: jdbc:mysql://mysql:3306/homestay?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC
-      DB_USERNAME: homestay
-      DB_PASSWORD: homestay
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    ports:
+      - "${REDIS_PORT_EXTERNAL:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  backend:
+    build:
+      context: ../backend
+      extra_hosts:
+        - "proxy:${PROXY_HOST_IP:-172.31.0.77}"
+      args:
+        HTTP_PROXY: ${HTTP_PROXY-}
+        HTTPS_PROXY: ${HTTPS_PROXY-}
+        NO_PROXY: ${NO_PROXY-}
+      secrets:
+        - proxyca
+    environment:
+      APP_ENV: ${APP_ENV:?APP_ENV is required}
+      DB_URL: jdbc:mysql://mysql:3306/${DB_NAME:-homestay}?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC
+      DB_USERNAME: ${DB_USERNAME:?DB_USERNAME is required}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
       REDIS_HOST: redis
-    ports: ["8080:8080"]
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      GUEST_ID_ENCRYPTION_KEY: ${GUEST_ID_ENCRYPTION_KEY:?GUEST_ID_ENCRYPTION_KEY is required}
+      SEED_ADMIN_ENABLED: ${SEED_ADMIN_ENABLED:-false}
+      ADMIN_INITIAL_USERNAME: ${ADMIN_INITIAL_USERNAME:-admin}
+      ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD-}
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
     depends_on:
-      mysql: {condition: service_healthy}
-      redis: {condition: service_started}
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:8080/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  user-web:
+    build:
+      context: ../web-user
+      extra_hosts:
+        - "proxy:${PROXY_HOST_IP:-172.31.0.77}"
+      args:
+        VITE_API_BASE_URL: /api/v1
+      secrets:
+        - proxyca
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -Y off -O /dev/null http://127.0.0.1/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  admin-web:
+    build:
+      context: ../web-admin
+      extra_hosts:
+        - "proxy:${PROXY_HOST_IP:-172.31.0.77}"
+      args:
+        VITE_API_BASE_URL: /api/v1
+      secrets:
+        - proxyca
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -Y off -O /dev/null http://127.0.0.1/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "${APP_PORT:-8088}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      user-web:
+        condition: service_healthy
+      admin-web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -Y off -O /dev/null http://127.0.0.1/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
 volumes:
   mysql_data:
   redis_data:
+
+secrets:
+  proxyca:
+    file: ${CODEX_PROXY_CERT:-/dev/null}

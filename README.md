@@ -2,7 +2,7 @@
 
 面向单体/多门店民宿的预订与运营管理系统，覆盖 **用户预订端 → 前台接待 → 住中服务 → 房务保洁 → 结算售后** 的完整业务闭环。
 
-> 当前状态：**核心业务闭环已完成**，后端、用户端和管理端均已实现并通过现有自动化验收脚本；后续以测试、部署和验收维护为主。
+> 当前状态：核心业务闭环、用户端、管理端和部署工程均已完成，后续以测试、部署和验收维护为主。
 
 ---
 
@@ -54,26 +54,46 @@ homestay-platform/
 └─ docs/           # 设计文档与接口契约
 ```
 
-## 本地启动
+## 本地开发与部署
+
+复制开发环境变量并启动完整 Compose 环境：
 
 ```bash
-cd web-user
-npm install
-npm run dev
+cp .env.example .env
+PROXY_HOST_IP="$(getent hosts proxy 2>/dev/null | awk '{print $1}')" \
+  docker compose --env-file .env -f deploy/docker-compose.yml up -d --build --wait
 ```
 
-用户端默认地址为 `http://localhost:5173`。后端需要 Java 21 和 Maven；基础服务可以使用 `docker compose -f deploy/docker-compose.yml up` 启动 MySQL、Redis 和后端容器。
+网关默认监听 `http://localhost:8088`：
 
-管理端在另一个终端启动：
+- 用户端：`http://localhost:8088/`
+- 管理端：`http://localhost:8088/admin/`
+- 后端 API：`http://localhost:8088/api/v1/`
+- 健康检查：`http://localhost:8088/health`
+
+用户端和管理端生产构建使用同源 `/api/v1`，由 Nginx 将 `/api/` 反向代理到后端，不依赖浏览器所在机器的 `localhost`。Vite 开发服务器仍可用 `VITE_DEV_API_PROXY_TARGET` 指向本地后端。
+
+Compose 要求数据库密码、Redis 密码和 `GUEST_ID_ENCRYPTION_KEY` 通过环境变量提供；`.env.example` 中的值只用于开发，不能带入生产。生产环境应设置 `APP_ENV=production`、`SEED_ADMIN_ENABLED=false`，并使用独立的 32 字节身份证加密密钥。开发管理员只有在 `SEED_ADMIN_ENABLED=true` 且显式提供 `ADMIN_INITIAL_PASSWORD` 时才会创建。
+
+停止并清理容器：
 
 ```bash
-cd web-admin
-npm install
-npm run dev
+docker compose --env-file .env -f deploy/docker-compose.yml down
 ```
 
-管理端默认地址为 `http://localhost:5174`。首次使用可先调用 `/api/v1/auth/register` 注册账号；管理端业务接口要求账号具有 `FRONT_DESK`、`OPERATION_ADMIN`、`ADMIN` 或 `SYSTEM_ADMIN` 角色，开发环境可在数据库中将账号的 `sys_user.role_code` 调整为其中一种角色后再登录。
-身份证加密使用 `GUEST_ID_ENCRYPTION_KEY` 配置 32 字节密钥；默认值只用于开发环境，部署时必须替换。
+本地单独启动前端仍可使用 `npm ci && npm run dev`；此时 `/api` 会通过 Vite 代理转发到 `VITE_DEV_API_PROXY_TARGET`（默认 `http://localhost:8080`）。
+
+## CI
+
+`.github/workflows/ci.yml` 在干净的 GitHub Actions runner 中执行：
+
+1. 后端 `mvn test`；
+2. 用户端和管理端 `npm ci && npm run build`；
+3. 使用随机测试密码和加密密钥启动完整 Compose；
+4. 运行 API smoke、运营接口 smoke；
+5. 安装 Chromium 后运行 Playwright E2E。
+
+任一 job 或集成检查失败都会阻断工作流。CI 只生成临时凭据，不提交真实密钥。
 
 ## 里程碑（详见文档第 22 章）
 

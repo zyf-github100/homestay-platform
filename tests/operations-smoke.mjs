@@ -20,7 +20,10 @@ async function expectStatus(path, status, options = {}) {
 }
 
 try {
-  const login = await expectStatus('/auth/login', 200, { method: 'POST', body: JSON.stringify({ username: process.env.E2E_ADMIN_USERNAME || 'admin', password: process.env.E2E_ADMIN_PASSWORD || 'admin123' }) })
+  const adminUsername = process.env.E2E_ADMIN_USERNAME
+  const adminPassword = process.env.E2E_ADMIN_PASSWORD
+  assert(adminUsername && adminPassword, 'E2E_ADMIN_USERNAME and E2E_ADMIN_PASSWORD are required')
+  const login = await expectStatus('/auth/login', 200, { method: 'POST', body: JSON.stringify({ username: adminUsername, password: adminPassword }) })
   const auth = { Authorization: `Bearer ${login.data.token}` }
 
   const property = await expectStatus('/admin/property', 200, { headers: auth })
@@ -44,9 +47,18 @@ try {
   const isoDate = (date) => date.toISOString().slice(0, 10)
   const availabilityCalendar = await expectStatus(`/admin/inventory/calendar?from=${isoDate(today)}&to=${isoDate(new Date(today.getTime() + 60 * 86400000))}`, 200, { headers: auth })
   const freeRoomIds = new Set(availabilityCalendar.data.days.flatMap((day) => day.rooms.filter((item) => item.category === 'AVAILABLE').map((item) => item.roomId)))
-  const room = rooms.data.find((item) => item.status === 'AVAILABLE' && freeRoomIds.has(item.id))
-  assert(room, 'an available room is required for room workflow smoke test')
-  await expectStatus(`/admin/rooms/${room.id}/operations`, 200, { method: 'POST', headers: auth, body: JSON.stringify({ status: 'MAINTENANCE', reason: '接口测试报修' }) })
+  const candidates = rooms.data.filter((item) => item.status === 'AVAILABLE' && freeRoomIds.has(item.id) && item.roomTypeName !== roomType.name)
+  assert(candidates.length > 0, 'an available room is required for room workflow smoke test')
+  let room = null
+  for (const candidate of candidates) {
+    const maintenance = await request(`/admin/rooms/${candidate.id}/operations`, { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'MAINTENANCE', reason: '接口测试报修' }) })
+    if (maintenance.response.status === 200) {
+      room = candidate
+      break
+    }
+    assert(maintenance.response.status === 409, `/admin/rooms/${candidate.id}/operations: expected 200 or 409, got ${maintenance.response.status}: ${JSON.stringify(maintenance.body)}`)
+  }
+  assert(room, 'an available room without an active assignment is required for room workflow smoke test')
   await expectStatus(`/admin/rooms/${room.id}/operations`, 200, { method: 'POST', headers: auth, body: JSON.stringify({ status: 'AVAILABLE', reason: '接口测试恢复' }) })
 
   const from = new Date(Date.now() + 1000 * 86400000 + Math.floor(Math.random() * 100000) * 86400000)

@@ -1,10 +1,10 @@
 <script setup>
 import { computed, nextTick, onMounted, ref } from 'vue'
 
-const api = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1'
+const api = import.meta.env.VITE_API_BASE_URL || '/api/v1'
 const token = ref(localStorage.getItem('homestay_admin_token') || '')
-const username = ref('admin')
-const password = ref('admin123')
+const username = ref('')
+const password = ref('')
 const error = ref('')
 const active = ref('概览')
 const loading = ref(false)

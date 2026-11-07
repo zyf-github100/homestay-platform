@@ -2,14 +2,20 @@ spring:
   application:
     name: homestay-platform
   datasource:
-    url: ${DB_URL:jdbc:mysql://localhost:3306/homestay?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC}
-    username: ${DB_USERNAME:homestay}
-    password: ${DB_PASSWORD:homestay}
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
   data:
     redis:
-      host: ${REDIS_HOST:localhost}
+      host: ${REDIS_HOST}
       port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD}
 server:
   port: ${SERVER_PORT:8080}
 guest:
-  id-encryption-key: ${GUEST_ID_ENCRYPTION_KEY:0123456789abcdef0123456789abcdef}
+  id-encryption-key: ${GUEST_ID_ENCRYPTION_KEY}
+homestay:
+  environment: ${APP_ENV}
+  seed-admin: ${SEED_ADMIN_ENABLED:false}
+  admin-username: ${ADMIN_INITIAL_USERNAME:admin}
+  admin-password: ${ADMIN_INITIAL_PASSWORD:}

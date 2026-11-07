@@ -1,7 +1,7 @@
 <script setup>
 import { computed, nextTick, onMounted, ref } from 'vue'
 
-const api = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1'
+const api = import.meta.env.VITE_API_BASE_URL || '/api/v1'
 const menuOpen = ref(false)
 const activeFilter = ref('全部')
 const checkIn = ref('2026-11-14')

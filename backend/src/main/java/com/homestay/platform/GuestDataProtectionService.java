@@ -9,6 +9,7 @@ import java.util.Base64;
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -18,7 +19,18 @@ public class GuestDataProtectionService {
   private final SecretKeySpec key;
   private final SecureRandom random = new SecureRandom();
 
-  public GuestDataProtectionService(@Value("${guest.id-encryption-key}") String keyMaterial) {
+  public GuestDataProtectionService(String keyMaterial) {
+    this(keyMaterial, "development");
+  }
+
+  @Autowired
+  public GuestDataProtectionService(
+      @Value("${guest.id-encryption-key}") String keyMaterial,
+      @Value("${homestay.environment:development}") String environment) {
+    if ("production".equalsIgnoreCase(environment)
+        && "0123456789abcdef0123456789abcdef".equals(keyMaterial)) {
+      throw new IllegalArgumentException("The development guest ID encryption key cannot be used in production");
+    }
     byte[] bytes = keyMaterial.getBytes(StandardCharsets.UTF_8);
     if (bytes.length != 32) throw new IllegalArgumentException("guest.id-encryption-key must be 32 bytes");
     this.key = new SecretKeySpec(bytes, "AES");
