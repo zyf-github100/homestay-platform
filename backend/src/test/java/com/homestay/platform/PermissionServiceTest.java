@@ -22,4 +22,19 @@ class PermissionServiceTest {
     assertTrue(permissions.has(7L, "room-type:view"));
     assertFalse(permissions.has(7L, "room-type:manage"));
   }
+
+  @Test
+  void legacyOperationAdminReceivesBackofficePermissions() {
+    JdbcTemplate jdbc = mock(JdbcTemplate.class);
+    when(jdbc.queryForList(org.mockito.ArgumentMatchers.contains("SELECT DISTINCT"), eq(String.class), eq(7L)))
+        .thenReturn(List.of());
+    when(jdbc.queryForList(org.mockito.ArgumentMatchers.contains("SELECT role_code"), eq(String.class), eq(7L)))
+        .thenReturn(List.of("OPERATION_ADMIN"));
+
+    PermissionService permissions = new PermissionService(jdbc);
+
+    assertTrue(permissions.has(7L, "property:manage"));
+    assertTrue(permissions.has(7L, "inventory:view"));
+    assertTrue(permissions.has(7L, "room:operate"));
+  }
 }

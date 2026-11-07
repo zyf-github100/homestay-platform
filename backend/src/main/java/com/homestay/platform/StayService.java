@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -22,15 +23,21 @@ import org.springframework.http.HttpStatus;
 public class StayService {
   private final JdbcTemplate jdbc;
   private final AuditService audit;
+  private final StringRedisTemplate redis;
 
   public StayService(JdbcTemplate jdbc) {
-    this(jdbc, null);
+    this(jdbc, null, null);
+  }
+
+  public StayService(JdbcTemplate jdbc, AuditService audit) {
+    this(jdbc, audit, null);
   }
 
   @Autowired
-  public StayService(JdbcTemplate jdbc, AuditService audit) {
+  public StayService(JdbcTemplate jdbc, AuditService audit, StringRedisTemplate redis) {
     this.jdbc = jdbc;
     this.audit = audit;
+    this.redis = redis;
   }
 
   @Transactional
@@ -164,6 +171,7 @@ public class StayService {
     String nextReservationStatus = "PENDING_PAYMENT".equals(String.valueOf(reservation.get("status"))) && "PAID".equals(paymentStatus)
         ? "CONFIRMED" : String.valueOf(reservation.get("status"));
     jdbc.update("UPDATE reservation SET status=?, payment_status=? WHERE id=?", nextReservationStatus, paymentStatus, reservation.get("id"));
+    confirmInventoryLocks(orderNo);
     recordAudit(operatorId, "PAYMENT_COLLECT", "RESERVATION", orderNo, "SUCCESS", "登记线下收款");
     return Map.of("code", "0", "message", "收款成功", "data", Map.of("paymentNo", paymentNo, "orderNo", orderNo, "amount", amount, "method", method.trim().toUpperCase(), "remark", remark == null ? "" : remark, "collected", nextCollected, "outstanding", due.subtract(nextCollected).max(BigDecimal.ZERO)));
   }
@@ -259,5 +267,15 @@ public class StayService {
 
   private void recordAudit(Long operatorId, String action, String resourceType, String resourceId, String result, String detail) {
     if (audit != null) audit.record(operatorId, action, resourceType, resourceId, result, detail);
+  }
+
+  private void confirmInventoryLocks(String orderNo) {
+    List<Map<String, Object>> locks = jdbc.queryForList("SELECT room_id, stay_date FROM inventory_lock WHERE order_no=?", orderNo);
+    jdbc.update("UPDATE inventory_lock SET expires_at=NULL WHERE order_no=?", orderNo);
+    if (redis != null) {
+      for (Map<String, Object> lock : locks) {
+        redis.delete("homestay:inventory-lock:" + lock.get("room_id") + ":" + lock.get("stay_date"));
+      }
+    }
   }
 }

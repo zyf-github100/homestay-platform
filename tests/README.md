@@ -18,6 +18,12 @@ With the backend running, interface regression tests cover CORS, authentication,
 node tests/api-smoke.mjs
 ```
 
+运营后台接口回归覆盖民宿资料、房型图片/设施、房务状态、人工订单、收款、分房、库存日历和审计：
+
+```bash
+E2E_ADMIN_USERNAME=admin E2E_ADMIN_PASSWORD=admin123 node tests/operations-smoke.mjs
+```
+
 For browser end-to-end coverage, start the backend and both Vite dev servers first, then run:
 
 ```bash
