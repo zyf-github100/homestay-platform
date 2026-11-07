@@ -30,6 +30,12 @@ public class RbacController {
     return Map.of("code", "0", "message", "success", "data", rbac.permissions());
   }
 
+  @GetMapping("/users")
+  public Map<String, Object> users(@RequestHeader(value = "Authorization", required = false) String authorization) {
+    session.requirePermission(authorization, "system:user");
+    return Map.of("code", "0", "message", "success", "data", rbac.users());
+  }
+
   @PutMapping("/users/{userId}/role")
   public Map<String, Object> assignRole(@PathVariable Long userId, @Valid @RequestBody RoleRequest body,
       @RequestHeader(value = "Authorization", required = false) String authorization) {
