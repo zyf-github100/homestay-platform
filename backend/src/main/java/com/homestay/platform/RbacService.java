@@ -26,6 +26,11 @@ public class RbacService {
     return jdbc.queryForList("SELECT id, code, name FROM sys_permission ORDER BY id");
   }
 
+  public List<Map<String, Object>> users() {
+    return jdbc.queryForList(
+        "SELECT id, username, display_name displayName, role_code roleCode, status, last_login_at lastLoginAt FROM sys_user ORDER BY id DESC");
+  }
+
   @Transactional
   public void assignRole(Long operatorId, Long userId, String roleCode) {
     List<Map<String, Object>> role = jdbc.queryForList("SELECT id, code FROM sys_role WHERE code=?", roleCode);
