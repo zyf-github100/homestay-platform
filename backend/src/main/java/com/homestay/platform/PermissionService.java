@@ -31,8 +31,8 @@ public class PermissionService {
 
   private Set<String> legacyPermissions(String role) {
     if ("SYSTEM_ADMIN".equals(role)) return Set.of("*");
-    if ("OPERATION_ADMIN".equals(role)) return Set.of("room-type:view", "room-type:manage", "room:view", "room:manage", "reservation:manage", "reservation:assign-room", "reservation:check-in", "reservation:change-room", "reservation:check-out", "payment:collect", "guest:view", "guest:view-sensitive", "review:moderate", "report:view", "audit:view");
-    if ("FRONT_DESK".equals(role) || "OPERATOR".equals(role) || "ADMIN".equals(role)) return Set.of("room-type:view", "room:view", "reservation:manage", "reservation:assign-room", "reservation:check-in", "reservation:change-room", "reservation:check-out", "payment:collect", "guest:view", "guest:view-sensitive");
+    if ("OPERATION_ADMIN".equals(role)) return Set.of("room-type:view", "room-type:manage", "room:view", "room:manage", "room:operate", "property:view", "property:manage", "inventory:view", "reservation:manage", "reservation:assign-room", "reservation:check-in", "reservation:change-room", "reservation:check-out", "payment:collect", "guest:view", "guest:view-sensitive", "review:moderate", "report:view", "audit:view");
+    if ("FRONT_DESK".equals(role) || "OPERATOR".equals(role) || "ADMIN".equals(role)) return Set.of("room-type:view", "room:view", "room:operate", "property:view", "inventory:view", "reservation:manage", "reservation:assign-room", "reservation:check-in", "reservation:change-room", "reservation:check-out", "payment:collect", "guest:view", "guest:view-sensitive");
     return Set.of("reservation:create", "reservation:view:self", "reservation:cancel:self", "payment:simulate", "guest:self", "review:create");
   }
 }

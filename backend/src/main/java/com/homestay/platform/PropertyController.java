@@ -31,12 +31,23 @@ public class PropertyController {
       JOIN property p ON p.id = rt.property_id
       WHERE rt.status = 'PUBLISHED' AND p.status = 'OPEN'
       GROUP BY rt.id ORDER BY rt.id
-      """, (rs, rowNum) -> Map.of(
-        "id", rs.getLong("id"), "name", rs.getString("name"),
-        "description", rs.getString("description"), "bedType", rs.getString("bed_type"),
-        "area", rs.getBigDecimal("area_sqm"), "maxGuests", rs.getInt("max_guests"),
-        "price", rs.getBigDecimal("base_price"), "coverImage", rs.getString("cover_image"),
-        "roomCount", rs.getInt("room_count"), "availableCount", rs.getInt("available_count")));
+      """, (rs, rowNum) -> {
+        Map<String, Object> row = new java.util.LinkedHashMap<>();
+        row.put("id", rs.getLong("id"));
+        row.put("name", rs.getString("name"));
+        row.put("description", rs.getString("description"));
+        row.put("bedType", rs.getString("bed_type"));
+        row.put("area", rs.getBigDecimal("area_sqm"));
+        row.put("maxGuests", rs.getInt("max_guests"));
+        row.put("price", rs.getBigDecimal("base_price"));
+        row.put("coverImage", rs.getString("cover_image"));
+        row.put("roomCount", rs.getInt("room_count"));
+        row.put("availableCount", rs.getInt("available_count"));
+        long roomTypeId = rs.getLong("id");
+        row.put("images", jdbc.queryForList("SELECT id, image_url imageUrl, alt_text altText, sort_order sortOrder FROM room_type_image WHERE room_type_id=? ORDER BY sort_order, id", roomTypeId));
+        row.put("facilities", jdbc.queryForList("SELECT id, name, sort_order sortOrder FROM room_type_facility WHERE room_type_id=? ORDER BY sort_order, id", roomTypeId));
+        return row;
+      });
     return Map.of("code", "0", "message", "success", "data", rows, "date", LocalDate.now().toString());
   }
 

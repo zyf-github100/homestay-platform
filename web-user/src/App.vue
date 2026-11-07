@@ -50,7 +50,7 @@ async function request(path, options = {}) {
 function userHeaders(extra = {}) { return { Authorization: `Bearer ${authToken.value}`, ...extra } }
 function notify(message) { toast.value = message; window.setTimeout(() => { toast.value = '' }, 3200) }
 function openDialog(dialog) { nextTick(() => { if (dialog.value && !dialog.value.open) dialog.value.showModal() }) }
-function closeDialog(dialog) { if (dialog.value?.open) dialog.value.close() }
+function closeDialog(dialog) { const target = dialog?.value || dialog; if (target?.open) target.close() }
 function showAuth(mode = 'login') { authMode.value = mode; authError.value = ''; openDialog(authDialog) }
 
 async function loadRooms() {

@@ -27,8 +27,7 @@ public class RbacService {
   }
 
   public List<Map<String, Object>> users() {
-    return jdbc.queryForList(
-        "SELECT id, username, display_name displayName, role_code roleCode, status, last_login_at lastLoginAt FROM sys_user ORDER BY id DESC");
+    return jdbc.queryForList("SELECT id, username, display_name displayName, role_code roleCode, status, last_login_at lastLoginAt FROM sys_user ORDER BY id DESC LIMIT 200");
   }
 
   @Transactional
