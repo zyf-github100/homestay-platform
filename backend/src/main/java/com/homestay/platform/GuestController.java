@@ -18,6 +18,7 @@ public class GuestController {
   }
 
   public record GuestRequest(@NotBlank String name, String gender, String phone, String idType, @NotBlank String idNo, String remark) {}
+  public record GuestUpdateRequest(@NotBlank String name, String gender, String phone, String idType, String idNo, String remark) {}
 
   @GetMapping("/guests")
   public Map<String, Object> list(@RequestHeader(value = "Authorization", required = false) String authorization) {
@@ -32,7 +33,7 @@ public class GuestController {
   }
 
   @PutMapping("/guests/{id}")
-  public Map<String, Object> update(@PathVariable Long id, @Valid @RequestBody GuestRequest body,
+  public Map<String, Object> update(@PathVariable Long id, @Valid @RequestBody GuestUpdateRequest body,
       @RequestHeader(value = "Authorization", required = false) String authorization) {
     Long userId = session.requirePermission(authorization, "guest:self").id();
     return Map.of("code", "0", "message", "更新成功", "data", guests.update(userId, id, body.name(), body.gender(), body.phone(), body.idType(), body.idNo(), body.remark()));

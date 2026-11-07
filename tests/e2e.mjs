@@ -26,14 +26,47 @@ try {
   await user.locator('#auth-password').fill(password)
   await user.locator('dialog[aria-labelledby="auth-title"] .modal-submit').click()
   await user.locator('dialog[aria-labelledby="auth-title"]').waitFor({ state: 'hidden' })
+
+  await user.locator('#check-in').fill('2099-08-10')
+  await user.locator('#check-out').fill('2099-08-12')
+  await user.getByRole('button', { name: '查询房源' }).click()
+  await user.getByRole('button', { name: /立即预订/ }).first().waitFor()
   await user.getByRole('button', { name: /立即预订/ }).first().click()
   await user.locator('#contact-name').fill('端到端用户')
   await user.locator('#contact-phone').fill('13500000000')
-  await user.getByRole('button', { name: /提交并模拟支付/ }).click()
-  await user.getByRole('button', { name: '我的订单' }).click()
-  await user.getByRole('heading', { name: '我的订单' }).waitFor()
+  await user.getByRole('button', { name: '进入支付' }).click()
+  await user.getByRole('heading', { name: '支付订单' }).waitFor()
+  await user.getByRole('button', { name: '模拟支付成功' }).click()
+  await user.locator('.result-banner strong').filter({ hasText: '支付成功' }).waitFor()
 
-  const result = { user: true, admin: false }
+  await user.getByRole('button', { name: '我的订单', exact: true }).click()
+  await user.getByRole('heading', { name: '我的订单' }).waitFor()
+  await user.getByRole('button', { name: '查看详情' }).first().click()
+  await user.getByRole('heading', { name: '订单详情' }).waitFor()
+  await user.getByRole('button', { name: '返回订单' }).click()
+
+  await user.getByRole('button', { name: '房客资料' }).click()
+  await user.locator('.account-hero h1').filter({ hasText: '房客资料' }).waitFor()
+  await user.getByRole('button', { name: /新增房客/ }).first().click()
+  await user.locator('#guest-name').fill('端到端房客')
+  await user.locator('#guest-phone').fill('13800000000')
+  await user.locator('#guest-id-no').fill('110101199001011234')
+  await user.getByRole('button', { name: '保存资料' }).click()
+  await user.getByText(/1101\*{10}1234/).waitFor()
+  await user.getByRole('button', { name: '编辑' }).first().click()
+  await user.locator('#guest-phone').fill('13900000000')
+  await user.getByRole('button', { name: '保存资料' }).click()
+  await user.getByText('13900000000', { exact: true }).waitFor()
+
+  await user.getByRole('button', { name: '我的评价' }).click()
+  await user.getByRole('heading', { name: '完成你的评价' }).waitFor()
+
+  await user.getByRole('button', { name: '我的订单', exact: true }).click()
+  await user.once('dialog', dialog => dialog.accept())
+  await user.getByRole('button', { name: '取消订单' }).first().click()
+  await user.getByText('订单已取消', { exact: true }).waitFor()
+
+  const result = { user: true, admin: false, flow: ['login', 'book', 'pay', 'order-detail', 'guest-crud', 'review-page', 'cancel'] }
   if (process.env.E2E_ADMIN_USERNAME && process.env.E2E_ADMIN_PASSWORD) {
     const admin = await browser.newPage()
     await admin.goto(adminUrl, { waitUntil: 'networkidle' })
