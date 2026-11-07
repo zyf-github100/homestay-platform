@@ -3,8 +3,9 @@
 The backend unit suite is run with the Docker Maven environment because the host image does not ship Maven:
 
 ```bash
+PROXY_IP="$(getent hosts proxy | awk 'NR == 1 { print $1 }')"
 docker run --rm \
-  --add-host=proxy:172.31.0.77 \
+  --add-host="proxy:${PROXY_IP}" \
   -e HTTP_PROXY -e HTTPS_PROXY -e NO_PROXY \
   -v "$CODEX_PROXY_CERT:/tmp/proxy-ca.crt:ro" \
   -v "$PWD/backend:/app" -w /app \
