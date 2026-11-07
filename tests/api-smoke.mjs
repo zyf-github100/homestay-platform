@@ -52,9 +52,10 @@ try {
   const payment = await expectStatus(`/reservations/${orderNo}/payments`, 200, { method: 'POST', headers: auth })
   await expectStatus(`/payments/${payment.data.paymentNo}/simulate`, 200, { method: 'POST', headers: json(auth), body: JSON.stringify({ result: 'SUCCESS' }) })
   await expectStatus(`/reservations/${orderNo}/cancel`, 200, { method: 'POST', headers: auth })
+  await expectStatus(`/guests/${guest.data.id}`, 200, { method: 'PUT', headers: json(auth), body: JSON.stringify({ name: '张三更新', phone: '13900000000', idType: 'ID_CARD', remark: '保留原证件' }) })
   await expectStatus(`/guests/${guest.data.id}`, 200, { method: 'DELETE', headers: auth })
 
-  console.log(JSON.stringify({ ok: true, checks: ['cors', 'room-types', 'unauthenticated-order', 'guest-masking', 'order-isolation', 'admin-rbac', 'payment', 'cancel'] }))
+  console.log(JSON.stringify({ ok: true, checks: ['cors', 'room-types', 'unauthenticated-order', 'guest-masking', 'guest-crud', 'order-isolation', 'admin-rbac', 'payment', 'cancel'] }))
 } catch (error) {
   console.error(error.stack || error)
   process.exitCode = 1
