@@ -69,7 +69,10 @@ function paymentLabel(status) {
 function userHeaders(extra = {}) { return authToken.value ? { Authorization: `Bearer ${authToken.value}`, ...extra } : { ...extra } }
 function notify(message) { toast.value = message; window.setTimeout(() => { toast.value = '' }, 3200) }
 function openDialog(dialog) { nextTick(() => { if (dialog.value && !dialog.value.open) dialog.value.showModal() }) }
-function closeDialog(dialog) { if (dialog.value?.open) dialog.value.close() }
+function closeDialog(dialog) {
+  const target = dialog?.value || dialog
+  if (target?.open) target.close()
+}
 function scrollTop() { window.scrollTo({ top: 0, behavior: 'smooth' }) }
 
 function clearSession(message = '登录状态已过期，请重新登录') {
