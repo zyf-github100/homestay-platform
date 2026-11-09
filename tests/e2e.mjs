@@ -57,7 +57,7 @@ try {
   await user.locator('#guest-phone').fill('13800000000')
   await user.locator('#guest-id-no').fill('110101199001011234')
   await user.getByRole('button', { name: '保存资料' }).click()
-  await user.getByText(/1101\*{10}1234/).waitFor()
+  await user.locator('.guest-card').getByText(/1101\*{10}1234/).waitFor()
   await user.getByRole('button', { name: '编辑' }).first().click()
   await user.locator('#guest-phone').fill('13900000000')
   await user.getByRole('button', { name: '保存资料' }).click()
