@@ -5,6 +5,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.PositiveOrZero;
+import jakarta.validation.constraints.Size;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
@@ -38,12 +39,12 @@ public class AdminController {
 
   public record RoomTypeRequest(@NotBlank String name, String description, @NotBlank String bedType,
       @PositiveOrZero BigDecimal area, @NotNull @Positive Integer maxGuests,
-      @NotNull @PositiveOrZero BigDecimal price, String coverImage) {}
+      @NotNull @PositiveOrZero BigDecimal price, @Size(max = 500) String coverImage) {}
   public record RoomRequest(@NotNull Long roomTypeId, @NotBlank String roomNo, String floorNo, String status, String remark) {}
   public record PropertySettingsRequest(@NotBlank String name, String description, @NotBlank String address,
       String phone, String checkInTime, String checkOutTime, String checkInRule, String checkOutRule,
       @NotBlank String status) {}
-  public record ImageRequest(@NotBlank String imageUrl, String altText, Integer sortOrder) {}
+  public record ImageRequest(@NotBlank @Size(max = 500) String imageUrl, String altText, Integer sortOrder) {}
   public record FacilityRequest(@NotBlank String name, Integer sortOrder) {}
   public record MediaRequest(List<@Valid ImageRequest> images, List<@Valid FacilityRequest> facilities) {}
   public record RoomOperationRequest(@NotBlank String status, String reason) {}
@@ -67,7 +68,7 @@ public class AdminController {
     Long operatorId = session.requirePermission(authorization, "room-type:manage").id();
     Long propertyId = propertyId();
     jdbc.update("INSERT INTO room_type(property_id,name,description,bed_type,area_sqm,max_guests,base_price,cover_image) VALUES(?,?,?,?,?,?,?,?)",
-        propertyId, body.name().trim(), body.description(), body.bedType().trim(), body.area(), body.maxGuests(), body.price(), body.coverImage());
+        propertyId, body.name().trim(), body.description(), body.bedType().trim(), body.area(), body.maxGuests(), body.price(), safeImageUrl(body.coverImage()));
     Long roomTypeId = jdbc.queryForObject("SELECT id FROM room_type WHERE property_id=? AND name=? ORDER BY id DESC LIMIT 1", Long.class, propertyId, body.name().trim());
     recordAudit(operatorId, "ROOM_TYPE_CREATE", "ROOM_TYPE", roomTypeId, "创建房型");
     return Map.of("code", "0", "message", "房型创建成功", "data", Map.of("id", roomTypeId));
@@ -79,7 +80,7 @@ public class AdminController {
     Long operatorId = session.requirePermission(authorization, "room-type:manage").id();
     ensureRoomType(id);
     jdbc.update("UPDATE room_type SET name=?,description=?,bed_type=?,area_sqm=?,max_guests=?,base_price=?,cover_image=? WHERE id=?",
-        body.name().trim(), body.description(), body.bedType().trim(), body.area(), body.maxGuests(), body.price(), body.coverImage(), id);
+        body.name().trim(), body.description(), body.bedType().trim(), body.area(), body.maxGuests(), body.price(), safeImageUrl(body.coverImage()), id);
     recordAudit(operatorId, "ROOM_TYPE_UPDATE", "ROOM_TYPE", id, "更新房型");
     return Map.of("code", "0", "message", "房型更新成功");
   }
@@ -247,7 +248,18 @@ public class AdminController {
 
   private void insertImage(Long roomTypeId, ImageRequest image) {
     jdbc.update("INSERT INTO room_type_image(room_type_id,image_url,alt_text,sort_order) VALUES(?,?,?,?)",
-        roomTypeId, image.imageUrl().trim(), image.altText(), image.sortOrder() == null ? 0 : image.sortOrder());
+        roomTypeId, safeImageUrl(image.imageUrl()), image.altText(), image.sortOrder() == null ? 0 : image.sortOrder());
+  }
+
+  private String safeImageUrl(String raw) {
+    if (raw == null || raw.isBlank()) return null;
+    String value = raw.trim();
+    if (value.length() > 500 || value.chars().anyMatch(Character::isWhitespace)
+        || !(value.startsWith("https://") || value.startsWith("http://")
+            || value.startsWith("/assets/") || value.startsWith("/uploads/"))) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "图片地址仅支持 HTTP(S) 或站内静态资源路径");
+    }
+    return value;
   }
 
   private void insertFacility(Long roomTypeId, FacilityRequest facility) {

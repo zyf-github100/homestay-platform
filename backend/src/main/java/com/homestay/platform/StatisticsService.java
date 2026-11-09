@@ -34,6 +34,16 @@ public class StatisticsService {
     Integer orderCount = jdbc.queryForObject("SELECT COUNT(*) FROM reservation WHERE DATE(created_at) BETWEEN ? AND ?", Integer.class, range.from, range.to);
     BigDecimal revenue = jdbc.queryForObject("SELECT COALESCE(SUM(amount),0) FROM payment WHERE status='SUCCESS' AND DATE(paid_at) BETWEEN ? AND ?", BigDecimal.class, range.from, range.to);
     BigDecimal refunds = jdbc.queryForObject("SELECT COALESCE(SUM(amount),0) FROM payment WHERE status='REFUNDED' AND DATE(updated_at) BETWEEN ? AND ?", BigDecimal.class, range.from, range.to);
+    BigDecimal bookedRevenue = jdbc.queryForObject(
+        "SELECT COALESCE(SUM(total_amount * DATEDIFF(LEAST(check_out, ?), GREATEST(check_in, ?)) / NULLIF(DATEDIFF(check_out, check_in), 0)),0) "
+            + "FROM reservation WHERE status NOT IN ('CANCELLED','PENDING_PAYMENT') AND check_in < ? AND check_out > ?",
+        BigDecimal.class, range.to.plusDays(1), range.from, range.to.plusDays(1), range.from);
+    BigDecimal outstandingAmount = jdbc.queryForObject(
+        "SELECT COALESCE(SUM(GREATEST(r.total_amount + COALESCE((SELECT SUM(fc.amount) FROM folio_charge fc WHERE fc.reservation_id=r.id),0) "
+            + "- COALESCE((SELECT SUM(p.amount) FROM payment p WHERE p.reservation_id=r.id AND p.status='SUCCESS'),0), 0)),0) "
+            + "FROM reservation r WHERE r.status IN ('CONFIRMED','CHECKED_IN','PARTIALLY_CHECKED_IN','PARTIALLY_CHECKED_OUT')",
+        BigDecimal.class);
+    Integer cancelledOrders = jdbc.queryForObject("SELECT COUNT(*) FROM reservation WHERE status='CANCELLED' AND DATE(updated_at) BETWEEN ? AND ?", Integer.class, range.from, range.to);
     Integer roomCount = jdbc.queryForObject("SELECT COUNT(*) FROM room WHERE status NOT IN ('MAINTENANCE','DISABLED')", Integer.class);
     Integer roomNights = jdbc.queryForObject("SELECT COALESCE(SUM(room_count * DATEDIFF(LEAST(check_out, ?), GREATEST(check_in, ?))),0) FROM reservation WHERE status NOT IN ('CANCELLED','PENDING_PAYMENT') AND check_in < ? AND check_out > ?", Integer.class,
         range.to.plusDays(1), range.from, range.to.plusDays(1), range.from);
@@ -41,12 +51,17 @@ public class StatisticsService {
     long days = range.from.until(range.to.plusDays(1)).getDays();
     BigDecimal capacity = BigDecimal.valueOf(Math.max(0, roomCount == null ? 0 : roomCount) * Math.max(1, days));
     BigDecimal occupancy = capacity.signum() == 0 ? BigDecimal.ZERO : BigDecimal.valueOf(roomNights == null ? 0 : roomNights).multiply(BigDecimal.valueOf(100)).divide(capacity, 2, RoundingMode.HALF_UP);
+    BigDecimal bookedRoomNights = BigDecimal.valueOf(roomNights == null ? 0 : roomNights);
+    BigDecimal adr = bookedRoomNights.signum() == 0 ? BigDecimal.ZERO : bookedRevenue.divide(bookedRoomNights, 2, RoundingMode.HALF_UP);
+    BigDecimal revpar = capacity.signum() == 0 ? BigDecimal.ZERO : bookedRevenue.divide(capacity, 2, RoundingMode.HALF_UP);
     Map<String, Object> data = new LinkedHashMap<>();
     data.put("from", range.from.toString()); data.put("to", range.to.toString());
     data.put("todayCheckInOrders", value(todayCheckIns)); data.put("todayCheckInRooms", value(todayCheckInRooms));
     data.put("todayCheckOutOrders", value(todayCheckOuts)); data.put("todayCheckOutRooms", value(todayCheckOutRooms));
     data.put("stayingOrders", value(stayingOrders)); data.put("stayingRooms", value(stayingRooms));
     data.put("orderCount", value(orderCount)); data.put("revenue", money(revenue)); data.put("refunds", money(refunds));
+    data.put("bookedRevenue", money(bookedRevenue)); data.put("adr", money(adr)); data.put("revpar", money(revpar));
+    data.put("outstandingAmount", money(outstandingAmount)); data.put("cancelledOrders", value(cancelledOrders));
     data.put("pendingOrders", value(pendingOrders));
     data.put("availableRooms", jdbc.queryForObject("SELECT COUNT(*) FROM room WHERE status='AVAILABLE'", Integer.class));
     data.put("dirtyRooms", jdbc.queryForObject("SELECT COUNT(*) FROM room WHERE status='DIRTY'", Integer.class));

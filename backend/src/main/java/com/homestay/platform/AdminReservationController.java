@@ -44,15 +44,35 @@ public class AdminReservationController {
   @GetMapping
   public Map<String, Object> list(@RequestParam(required = false) String status,
       @RequestParam(required = false) String orderNo,
+      @RequestParam(required = false) String contactPhone,
+      @RequestParam(required = false) String roomNo,
+      @RequestParam(required = false) LocalDate checkInFrom,
+      @RequestParam(required = false) LocalDate checkInTo,
+      @RequestParam(defaultValue = "1") int page,
+      @RequestParam(defaultValue = "50") int size,
       @RequestHeader(value = "Authorization", required = false) String authorization) {
     session.requirePermission(authorization, "reservation:manage");
-    StringBuilder sql = new StringBuilder("SELECT order_no orderNo, contact_name contactName, contact_phone contactPhone, check_in checkIn, check_out checkOut, room_count roomCount, total_amount total, status, payment_status paymentStatus, source, created_at createdAt FROM reservation WHERE 1=1");
+    int safePage = Math.max(page, 1);
+    int safeSize = Math.min(Math.max(size, 1), 100);
+    StringBuilder where = new StringBuilder(" FROM reservation WHERE 1=1");
     java.util.ArrayList<Object> args = new java.util.ArrayList<>();
-    if (status != null && !status.isBlank()) { sql.append(" AND status=?"); args.add(status); }
-    if (orderNo != null && !orderNo.isBlank()) { sql.append(" AND order_no=?"); args.add(orderNo); }
-    sql.append(" ORDER BY id DESC LIMIT 200");
-    List<Map<String, Object>> data = jdbc.queryForList(sql.toString(), args.toArray());
-    return Map.of("code", "0", "message", "success", "data", data);
+    if (status != null && !status.isBlank()) { where.append(" AND status=?"); args.add(status.trim()); }
+    if (orderNo != null && !orderNo.isBlank()) { where.append(" AND order_no LIKE ?"); args.add("%" + orderNo.trim() + "%"); }
+    if (contactPhone != null && !contactPhone.isBlank()) { where.append(" AND contact_phone LIKE ?"); args.add("%" + contactPhone.trim() + "%"); }
+    if (roomNo != null && !roomNo.isBlank()) {
+      where.append(" AND EXISTS (SELECT 1 FROM reservation_room rr JOIN room r ON r.id=rr.room_id WHERE rr.reservation_id=reservation.id AND r.room_no LIKE ?)");
+      args.add("%" + roomNo.trim() + "%");
+    }
+    if (checkInFrom != null) { where.append(" AND check_in>=?"); args.add(checkInFrom); }
+    if (checkInTo != null) { where.append(" AND check_in<=?"); args.add(checkInTo); }
+    Integer total = jdbc.queryForObject("SELECT COUNT(*)" + where, Integer.class, args.toArray());
+    String sql = "SELECT order_no orderNo, contact_name contactName, contact_phone contactPhone, check_in checkIn, check_out checkOut, room_count roomCount, total_amount total, status, payment_status paymentStatus, source, created_at createdAt" + where + " ORDER BY id DESC LIMIT " + safeSize + " OFFSET " + ((long) (safePage - 1) * safeSize);
+    List<Map<String, Object>> data = jdbc.queryForList(sql, args.toArray());
+    Map<String, Object> result = new java.util.LinkedHashMap<>();
+    result.put("code", "0"); result.put("message", "success"); result.put("data", data);
+    result.put("page", safePage); result.put("size", safeSize); result.put("total", total == null ? 0 : total);
+    result.put("totalPages", total == null || total == 0 ? 0 : (total + safeSize - 1) / safeSize);
+    return result;
   }
 
   @GetMapping("/{orderNo}")

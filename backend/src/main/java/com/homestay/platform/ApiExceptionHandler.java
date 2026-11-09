@@ -63,6 +63,7 @@ public class ApiExceptionHandler {
     if (message.contains("订单不存在")) return "RESERVATION_NOT_FOUND";
     if (status == HttpStatus.UNAUTHORIZED.value()) return "AUTH_REQUIRED";
     if (status == HttpStatus.FORBIDDEN.value()) return "PERMISSION_DENIED";
+    if (status == HttpStatus.TOO_MANY_REQUESTS.value()) return "RATE_LIMITED";
     if (status == HttpStatus.NOT_FOUND.value()) return "RESOURCE_NOT_FOUND";
     if (status == HttpStatus.CONFLICT.value()) return "RESOURCE_CONFLICT";
     return switch (status) {

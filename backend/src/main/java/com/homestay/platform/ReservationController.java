@@ -86,9 +86,28 @@ public class ReservationController {
   }
 
   @GetMapping
-  public Map<String,Object> list(@RequestHeader(value="Authorization", required=false) String authorization) {
+  public Map<String,Object> list(@RequestParam(required = false) String status,
+      @RequestParam(defaultValue = "1") int page,
+      @RequestParam(defaultValue = "20") int size,
+      @RequestHeader(value="Authorization", required=false) String authorization) {
     SessionService.SessionUser user = session.requirePermission(authorization, "reservation:view:self");
-    return Map.of("code","0","message","success","data",jdbc.queryForList("SELECT order_no orderNo, contact_name contactName, check_in checkIn, check_out checkOut, room_count roomCount, total_amount total, status, payment_status paymentStatus, created_at createdAt FROM reservation WHERE user_id=? ORDER BY id DESC", user.id()));
+    int safePage = Math.max(page, 1);
+    int safeSize = Math.min(Math.max(size, 1), 50);
+    StringBuilder where = new StringBuilder(" FROM reservation WHERE user_id=?");
+    List<Object> args = new ArrayList<>(); args.add(user.id());
+    if (status != null && !status.isBlank()) { where.append(" AND status=?"); args.add(status.trim()); }
+    Integer total = jdbc.queryForObject("SELECT COUNT(*)" + where, Integer.class, args.toArray());
+    List<Map<String, Object>> data = jdbc.queryForList("SELECT order_no orderNo, contact_name contactName, check_in checkIn, check_out checkOut, room_count roomCount, total_amount total, status, payment_status paymentStatus, created_at createdAt" + where + " ORDER BY id DESC LIMIT " + safeSize + " OFFSET " + ((long) (safePage - 1) * safeSize), args.toArray());
+    Map<String, Object> result = new LinkedHashMap<>();
+    result.put("code", "0"); result.put("message", "success"); result.put("data", data);
+    result.put("page", safePage); result.put("size", safeSize); result.put("total", total == null ? 0 : total);
+    result.put("totalPages", total == null || total == 0 ? 0 : (total + safeSize - 1) / safeSize);
+    return result;
+  }
+
+  /** Backward-compatible overload used by integrations that only pass the auth header. */
+  public Map<String, Object> list(String authorization) {
+    return list(null, 1, 20, authorization);
   }
 
   @GetMapping("/{orderNo}")

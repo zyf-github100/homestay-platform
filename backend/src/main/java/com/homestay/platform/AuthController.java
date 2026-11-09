@@ -8,6 +8,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -23,8 +24,11 @@ public class AuthController {
   private final PasswordEncoder encoder;
   private final AuditService audit;
   private final SessionService session;
-  public AuthController(JdbcTemplate jdbc, StringRedisTemplate redis, PasswordEncoder encoder, AuditService audit, SessionService session) {
-    this.jdbc = jdbc; this.redis = redis; this.encoder = encoder; this.audit = audit; this.session = session;
+  private final RateLimitService rateLimits;
+  public AuthController(JdbcTemplate jdbc, StringRedisTemplate redis, PasswordEncoder encoder,
+      AuditService audit, SessionService session, RateLimitService rateLimits) {
+    this.jdbc = jdbc; this.redis = redis; this.encoder = encoder; this.audit = audit;
+    this.session = session; this.rateLimits = rateLimits;
   }
 
   public record RegisterRequest(@NotBlank String username, String phone,
@@ -34,7 +38,8 @@ public class AuthController {
   public record LoginRequest(@NotBlank String username, @NotBlank String password) {}
 
   @PostMapping("/register")
-  public Map<String, Object> register(@Valid @RequestBody RegisterRequest body) {
+  public Map<String, Object> register(@Valid @RequestBody RegisterRequest body, HttpServletRequest request) {
+    rateLimits.check("auth-register", rateLimits.clientAddress(request), 6, Duration.ofMinutes(10));
     String username = body.username().trim();
     String displayName = body.displayName().trim();
     String phone = body.phone() == null || body.phone().isBlank() ? null : body.phone().trim();
@@ -52,7 +57,8 @@ public class AuthController {
   }
 
   @PostMapping("/login")
-  public Map<String, Object> login(@Valid @RequestBody LoginRequest body) {
+  public Map<String, Object> login(@Valid @RequestBody LoginRequest body, HttpServletRequest request) {
+    rateLimits.check("auth-login", rateLimits.clientAddress(request), 10, Duration.ofMinutes(1));
     String username = body.username().trim();
     var users = jdbc.queryForList("SELECT id, username, phone, password_hash, display_name, role_code, status FROM sys_user WHERE username = ?", username);
     if (users.isEmpty()
