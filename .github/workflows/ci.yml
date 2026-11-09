@@ -146,17 +146,20 @@ jobs:
               -o ServerAliveInterval=30 \
               -o ServerAliveCountMax=20 \
               "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}"
-      - name: Verify production health
+      - name: Verify production health and routing
         run: |
-          url="http://${{ secrets.DEPLOY_HOST }}:8090/health"
+          base="http://${{ secrets.DEPLOY_HOST }}:8090"
+          body=""
           for i in $(seq 1 30); do
-            body=$(curl -fsS --max-time 10 "$url" || true)
-            echo "attempt $i: $body"
-            if printf '%s' "$body" | grep -q '"status":"ok"'; then
-              echo "production is healthy"
-              exit 0
-            fi
+            body=$(curl -fsS --max-time 10 "$base/health" || true)
+            printf 'attempt %s: %s\n' "$i" "$body"
+            if printf '%s' "$body" | grep -q '"status":"ok"'; then break; fi
             sleep 10
           done
-          echo "health check failed" >&2
-          exit 1
+          printf '%s' "$body" | grep -q '"status":"ok"' || { echo "::error::backend health check failed"; exit 1; }
+          # nginx caches upstream IPs; catch the user/admin-web routing swap before it ships.
+          curl -fsS --max-time 10 "$base/" | grep -q 'src="/assets/' \
+            || { echo "::error::user web is not served at /"; exit 1; }
+          curl -fsS --max-time 10 "$base/admin/" | grep -q 'src="/admin/assets/' \
+            || { echo "::error::admin web is not served at /admin/"; exit 1; }
+          echo "production health and routing ok"
