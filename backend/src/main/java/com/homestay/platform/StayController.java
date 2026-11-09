@@ -7,6 +7,7 @@ import jakarta.validation.constraints.Positive;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
@@ -14,17 +15,33 @@ import org.springframework.web.bind.annotation.*;
 public class StayController {
   private final SessionService session;
   private final StayService stays;
+  private final PaymentService payments;
 
   public StayController(SessionService session, StayService stays) {
+    this(session, stays, null);
+  }
+
+  @Autowired
+  public StayController(SessionService session, StayService stays, PaymentService payments) {
     this.session = session;
     this.stays = stays;
+    this.payments = payments;
   }
 
   public record AssignRoomRequest(@NotNull List<Long> roomIds) {}
   public record CheckInRequest(List<Long> reservationRoomIds) {}
   public record ChangeRoomRequest(@NotNull Long reservationRoomId, @NotNull Long newRoomId, @NotBlank String reason, BigDecimal feeDifference) {}
   public record CollectRequest(@NotBlank String orderNo, @NotNull @Positive BigDecimal amount, @NotBlank String method, String remark) {}
+  public record ChargeRequest(@NotBlank String type, @NotNull @Positive BigDecimal amount, String description) {}
   public record CheckOutRequest(List<Long> reservationRoomIds) {}
+
+  @PostMapping("/reservations/{orderNo}/cancel")
+  public Map<String, Object> cancel(
+      @PathVariable String orderNo,
+      @RequestHeader(value = "Authorization", required = false) String authorization) {
+    return payments.cancelReservationByOperator(orderNo,
+        session.requirePermission(authorization, "reservation:manage").id());
+  }
 
   @PostMapping("/reservations/{orderNo}/assign-room")
   public Map<String, Object> assignRoom(
@@ -63,5 +80,14 @@ public class StayController {
       @Valid @RequestBody CollectRequest body,
       @RequestHeader(value = "Authorization", required = false) String authorization) {
     return stays.collect(body.orderNo(), session.requirePermission(authorization, "payment:collect").id(), body.amount(), body.method(), body.remark());
+  }
+
+  @PostMapping("/reservations/{orderNo}/charges")
+  public Map<String, Object> addCharge(
+      @PathVariable String orderNo,
+      @Valid @RequestBody ChargeRequest body,
+      @RequestHeader(value = "Authorization", required = false) String authorization) {
+    return stays.addCharge(orderNo, session.requirePermission(authorization, "payment:collect").id(),
+        body.type(), body.amount(), body.description());
   }
 }

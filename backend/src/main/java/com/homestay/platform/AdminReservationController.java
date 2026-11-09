@@ -8,8 +8,10 @@ import jakarta.validation.constraints.Size;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api/v1/admin/reservations")
@@ -58,11 +60,13 @@ public class AdminReservationController {
       @RequestHeader(value = "Authorization", required = false) String authorization) {
     session.requirePermission(authorization, "reservation:manage");
     List<Map<String, Object>> orders = jdbc.queryForList("SELECT id, order_no orderNo, contact_name contactName, contact_phone contactPhone, check_in checkIn, check_out checkOut, guests, room_count roomCount, total_amount total, status, payment_status paymentStatus, source, created_at createdAt FROM reservation WHERE order_no=?", orderNo);
-    if (orders.isEmpty()) return Map.of("code", "1", "message", "订单不存在");
+    if (orders.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "订单不存在");
     Map<String, Object> data = new java.util.LinkedHashMap<>(orders.getFirst());
     data.put("items", jdbc.queryForList("SELECT ri.id, rt.name roomTypeName, ri.quantity, ri.unit_price unitPrice, ri.nights FROM reservation_item ri JOIN room_type rt ON rt.id=ri.room_type_id WHERE ri.reservation_id=? ORDER BY ri.id", data.get("id")));
     data.put("rooms", jdbc.queryForList("SELECT rr.id reservationRoomId, r.id roomId, r.room_no roomNo, r.room_type_id roomTypeId, rr.status, rr.assigned_at assignedAt, rr.check_in_at checkInAt, rr.check_out_at checkOutAt FROM reservation_room rr JOIN room r ON r.id=rr.room_id WHERE rr.reservation_id=? ORDER BY rr.id", data.get("id")));
     data.put("payments", jdbc.queryForList("SELECT payment_no paymentNo, amount, method, status, paid_at paidAt FROM payment WHERE reservation_id=? ORDER BY id", data.get("id")));
+    data.put("charges", jdbc.queryForList("SELECT id, type, amount, description, created_at createdAt FROM folio_charge WHERE reservation_id=? ORDER BY id", data.get("id")));
+    data.put("guests", jdbc.queryForList("SELECT id, name, gender, phone, id_type idType, id_no_masked idNoMasked, is_primary isPrimary FROM reservation_guest WHERE reservation_id=? ORDER BY id", data.get("id")));
     return Map.of("code", "0", "message", "success", "data", data);
   }
 }

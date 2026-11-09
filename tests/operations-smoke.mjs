@@ -61,7 +61,7 @@ try {
   assert(room, 'an available room without an active assignment is required for room workflow smoke test')
   await expectStatus(`/admin/rooms/${room.id}/operations`, 200, { method: 'POST', headers: auth, body: JSON.stringify({ status: 'AVAILABLE', reason: '接口测试恢复' }) })
 
-  const from = new Date(Date.now() + 1000 * 86400000 + Math.floor(Math.random() * 100000) * 86400000)
+  const from = new Date(Date.now() + (30 + Math.floor(Math.random() * 30)) * 86400000)
   const to = new Date(from.getTime() + 86400000)
   const iso = (date) => date.toISOString().slice(0, 10)
   const manual = await expectStatus('/admin/reservations', 200, { method: 'POST', headers: auth, body: JSON.stringify({ checkIn: iso(from), checkOut: iso(to), guests: 1, contactName: '接口人工订单', contactPhone: '13900000000', items: [{ roomTypeId: roomType.id, quantity: 1 }] }) })

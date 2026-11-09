@@ -6,6 +6,11 @@ const userUrl = process.env.USER_WEB_URL || 'http://localhost:5173'
 const adminUrl = process.env.ADMIN_WEB_URL || 'http://localhost:5174'
 const username = process.env.E2E_USERNAME || `e2euser${Date.now()}`
 const password = process.env.E2E_PASSWORD || 'Pass1234'
+const isoDate = (offsetDays) => {
+  const date = new Date()
+  date.setUTCDate(date.getUTCDate() + offsetDays)
+  return date.toISOString().slice(0, 10)
+}
 
 async function apiRequest(path, options = {}) {
   const response = await fetch(`${api}${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } })
@@ -27,8 +32,8 @@ try {
   await user.locator('dialog[aria-labelledby="auth-title"] .modal-submit').click()
   await user.locator('dialog[aria-labelledby="auth-title"]').waitFor({ state: 'hidden' })
 
-  await user.locator('#check-in').fill('2099-08-10')
-  await user.locator('#check-out').fill('2099-08-12')
+  await user.locator('#check-in').fill(isoDate(30))
+  await user.locator('#check-out').fill(isoDate(32))
   await user.getByRole('button', { name: '查询房源' }).click()
   await user.getByRole('button', { name: /立即预订/ }).first().waitFor()
   await user.getByRole('button', { name: /立即预订/ }).first().click()

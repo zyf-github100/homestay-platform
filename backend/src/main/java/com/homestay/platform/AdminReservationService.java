@@ -2,6 +2,7 @@ package com.homestay.platform;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
@@ -40,13 +41,18 @@ public class AdminReservationService {
 
     long nights = ChronoUnit.DAYS.between(checkIn, checkOut);
     BigDecimal total = BigDecimal.ZERO;
+    int capacity = 0;
     for (Item item : items) {
-      BigDecimal price = jdbc.queryForObject(
-          "SELECT base_price FROM room_type rt JOIN property p ON p.id=rt.property_id WHERE rt.id=? AND rt.status='PUBLISHED' AND p.status='OPEN'",
-          BigDecimal.class, item.roomTypeId());
-      if (price == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "房型不存在或已下架");
+      List<Map<String, Object>> roomTypes = jdbc.queryForList(
+          "SELECT rt.base_price price, rt.max_guests maxGuests FROM room_type rt JOIN property p ON p.id=rt.property_id WHERE rt.id=? AND rt.status='PUBLISHED' AND p.status='OPEN'",
+          item.roomTypeId());
+      if (roomTypes.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "房型不存在或已下架");
+      Map<String, Object> roomType = roomTypes.getFirst();
+      BigDecimal price = (BigDecimal) roomType.get("price");
+      capacity += ((Number) roomType.get("maxGuests")).intValue() * item.quantity();
       total = total.add(price.multiply(BigDecimal.valueOf(item.quantity())).multiply(BigDecimal.valueOf(nights)));
     }
+    if (guests > capacity) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "入住人数超过所选房型容量");
 
     String orderNo = "QY" + UUID.randomUUID().toString().replace("-", "").substring(0, 20);
     List<String> lockedKeys = new ArrayList<>();
@@ -71,7 +77,7 @@ public class AdminReservationService {
         }
       }
 
-      jdbc.update("INSERT INTO reservation(order_no,user_id,contact_name,contact_phone,check_in,check_out,guests,room_count,total_amount,source,created_by) VALUES(?,?,?,?,?,?,?,?,?,'MANUAL',?)",
+      jdbc.update("INSERT INTO reservation(order_no,user_id,contact_name,contact_phone,check_in,check_out,guests,room_count,total_amount,cancellation_policy,source,created_by) VALUES(?,?,?,?,?,?,?,?,?,'STANDARD_24H','MANUAL',?)",
           orderNo, userId, contactName.trim(), contactPhone.trim(), checkIn, checkOut, guests,
           items.stream().mapToInt(Item::quantity).sum(), total, operatorId);
       Long reservationId = jdbc.queryForObject("SELECT id FROM reservation WHERE order_no=?", Long.class, orderNo);
@@ -95,6 +101,11 @@ public class AdminReservationService {
       String contactPhone, List<Item> items) {
     if (checkIn == null || checkOut == null || !checkOut.isAfter(checkIn)) {
       throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "离店日期必须晚于入住日期");
+    }
+    LocalDate today = LocalDate.now(ZoneOffset.UTC);
+    if (checkIn.isBefore(today)) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "入住日期不能早于当前日期");
+    if (checkOut.isAfter(checkIn.plusDays(366))) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "预订日期范围不能超过 366 天");
     }
     if (guests == null || guests < 1) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "入住人数必须大于 0");
     if (contactName == null || contactName.isBlank() || contactPhone == null || contactPhone.isBlank()) {

@@ -7,6 +7,7 @@ import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Size;
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -26,7 +27,10 @@ public class ReservationController {
   @Autowired
   public ReservationController(JdbcTemplate jdbc, StringRedisTemplate redis, SessionService session, PaymentService payments, AuditService audit) { this.jdbc = jdbc; this.redis = redis; this.session = session; this.payments = payments; this.audit = audit; }
   public record Item(@NotNull Long roomTypeId, @NotNull @Positive Integer quantity) {}
-  public record CreateRequest(@NotNull LocalDate checkIn, @NotNull LocalDate checkOut, @NotNull @Positive Integer guests, @NotBlank String contactName, @NotBlank String contactPhone, @NotNull @Size(min = 1) List<@Valid Item> items) {}
+  public record CreateRequest(@NotNull LocalDate checkIn, @NotNull LocalDate checkOut,
+      @NotNull @Positive Integer guests, @NotBlank String contactName,
+      @NotBlank String contactPhone, @NotNull @Size(min = 1) List<@Valid Item> items,
+      List<@Positive Long> guestIds) {}
 
   @PostMapping("/price-check")
   public Map<String,Object> price(@Valid @RequestBody CreateRequest body) { return Map.of("code","0","message","success","data", calculate(body)); }
@@ -59,9 +63,17 @@ public class ReservationController {
           jdbc.update("INSERT INTO inventory_lock(room_id,stay_date,order_no,expires_at) VALUES(?,?,?,DATE_ADD(NOW(), INTERVAL 15 MINUTE))", roomId, date, orderNo);
         }
       }
-      jdbc.update("INSERT INTO reservation(order_no,user_id,contact_name,contact_phone,check_in,check_out,guests,room_count,total_amount) VALUES(?,?,?,?,?,?,?,?,?)", orderNo, user.id(), body.contactName(), body.contactPhone(), body.checkIn(), body.checkOut(), body.guests(), body.items().stream().mapToInt(Item::quantity).sum(), pricing.get("total"));
+      jdbc.update("INSERT INTO reservation(order_no,user_id,contact_name,contact_phone,check_in,check_out,guests,room_count,total_amount,cancellation_policy) VALUES(?,?,?,?,?,?,?,?,?,'STANDARD_24H')", orderNo, user.id(), body.contactName(), body.contactPhone(), body.checkIn(), body.checkOut(), body.guests(), body.items().stream().mapToInt(Item::quantity).sum(), pricing.get("total"));
       Long reservationId = jdbc.queryForObject("SELECT id FROM reservation WHERE order_no=?", Long.class, orderNo);
-      for (Item item : body.items()) { BigDecimal unit = jdbc.queryForObject("SELECT base_price FROM room_type WHERE id=?", BigDecimal.class, item.roomTypeId()); jdbc.update("INSERT INTO reservation_item(reservation_id,room_type_id,quantity,unit_price,nights) VALUES(?,?,?,?,?)", reservationId, item.roomTypeId(), item.quantity(), unit, nights); }
+      for (Item item : body.items()) {
+        BigDecimal unit = jdbc.queryForObject(
+            "SELECT rt.base_price FROM room_type rt JOIN property p ON p.id=rt.property_id "
+                + "WHERE rt.id=? AND rt.status='PUBLISHED' AND p.status='OPEN'",
+            BigDecimal.class, item.roomTypeId());
+        jdbc.update("INSERT INTO reservation_item(reservation_id,room_type_id,quantity,unit_price,nights) VALUES(?,?,?,?,?)",
+            reservationId, item.roomTypeId(), item.quantity(), unit, nights);
+      }
+      saveGuestSnapshots(user.id(), reservationId, body.guestIds(), body.guests());
       if (idempotencyKey != null) redis.opsForValue().set("homestay:idempotency:reservation:" + idempotencyKey, orderNo, java.time.Duration.ofHours(24));
       if (audit != null) audit.record(user.id(), "RESERVATION_CREATE", "RESERVATION", orderNo, "SUCCESS", "创建订单");
       return Map.of("code","0","message","订单创建成功","data",Map.of("orderNo",orderNo,"total",pricing.get("total"),"status","PENDING_PAYMENT"));
@@ -83,12 +95,14 @@ public class ReservationController {
   public Map<String, Object> detail(@PathVariable String orderNo,
       @RequestHeader(value = "Authorization", required = false) String authorization) {
     SessionService.SessionUser user = session.requirePermission(authorization, "reservation:view:self");
-    List<Map<String, Object>> orders = jdbc.queryForList("SELECT id, order_no orderNo, contact_name contactName, contact_phone contactPhone, check_in checkIn, check_out checkOut, guests, room_count roomCount, total_amount total, status, payment_status paymentStatus, created_at createdAt FROM reservation WHERE order_no=? AND user_id=?", orderNo, user.id());
+    List<Map<String, Object>> orders = jdbc.queryForList("SELECT id, order_no orderNo, contact_name contactName, contact_phone contactPhone, check_in checkIn, check_out checkOut, guests, room_count roomCount, total_amount total, cancellation_policy cancellationPolicy, status, payment_status paymentStatus, created_at createdAt FROM reservation WHERE order_no=? AND user_id=?", orderNo, user.id());
     if (orders.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "订单不存在");
     Map<String, Object> data = new LinkedHashMap<>(orders.getFirst());
     data.put("items", jdbc.queryForList("SELECT ri.id, rt.name roomTypeName, ri.quantity, ri.unit_price unitPrice, ri.nights FROM reservation_item ri JOIN room_type rt ON rt.id=ri.room_type_id WHERE ri.reservation_id=? ORDER BY ri.id", data.get("id")));
     data.put("rooms", jdbc.queryForList("SELECT rr.id reservationRoomId, r.room_no roomNo, r.room_type_id roomTypeId, rr.status, rr.assigned_at assignedAt, rr.check_in_at checkInAt, rr.check_out_at checkOutAt FROM reservation_room rr JOIN room r ON r.id=rr.room_id WHERE rr.reservation_id=? ORDER BY rr.id", data.get("id")));
     data.put("payments", jdbc.queryForList("SELECT payment_no paymentNo, amount, method, status, paid_at paidAt FROM payment WHERE reservation_id=? ORDER BY id", data.get("id")));
+    data.put("charges", jdbc.queryForList("SELECT id, type, amount, description, created_at createdAt FROM folio_charge WHERE reservation_id=? ORDER BY id", data.get("id")));
+    data.put("guests", jdbc.queryForList("SELECT id, name, gender, phone, id_type idType, id_no_masked idNoMasked, is_primary isPrimary FROM reservation_guest WHERE reservation_id=? ORDER BY id", data.get("id")));
     return Map.of("code", "0", "message", "success", "data", data);
   }
 
@@ -99,14 +113,65 @@ public class ReservationController {
     return payments.cancelReservation(orderNo, session.requirePermission(authorization, "reservation:cancel:self").id());
   }
 
+  @GetMapping("/{orderNo}/cancel-preview")
+  public Map<String, Object> cancelPreview(@PathVariable String orderNo,
+      @RequestHeader(value = "Authorization", required = false) String authorization) {
+    return payments.cancellationPreview(orderNo,
+        session.requirePermission(authorization, "reservation:cancel:self").id());
+  }
+
   private Map<String,Object> calculate(CreateRequest body) {
     validateDates(body);
     long nights = ChronoUnit.DAYS.between(body.checkIn(), body.checkOut()); BigDecimal total = BigDecimal.ZERO;
-    for (Item item : body.items()) { BigDecimal price = jdbc.queryForObject("SELECT base_price FROM room_type WHERE id=? AND status='PUBLISHED'", BigDecimal.class, item.roomTypeId()); if (price == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "房型不存在"); total = total.add(price.multiply(BigDecimal.valueOf(item.quantity())).multiply(BigDecimal.valueOf(nights))); }
+    int capacity = 0;
+    for (Item item : body.items()) {
+      List<Map<String, Object>> rows = jdbc.queryForList(
+          "SELECT rt.base_price price, rt.max_guests maxGuests FROM room_type rt "
+              + "JOIN property p ON p.id=rt.property_id "
+              + "WHERE rt.id=? AND rt.status='PUBLISHED' AND p.status='OPEN'",
+          item.roomTypeId());
+      if (rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "房型不存在或民宿暂停营业");
+      Map<String, Object> roomType = rows.getFirst();
+      BigDecimal price = (BigDecimal) roomType.get("price");
+      int maxGuests = ((Number) roomType.get("maxGuests")).intValue();
+      capacity += maxGuests * item.quantity();
+      total = total.add(price.multiply(BigDecimal.valueOf(item.quantity())).multiply(BigDecimal.valueOf(nights)));
+    }
+    if (body.guests() > capacity) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "入住人数超过所选房型容量");
     return Map.of("nights", nights, "total", total);
   }
 
   private void validateDates(CreateRequest body) {
+    LocalDate today = LocalDate.now(ZoneOffset.UTC);
+    if (body.checkIn().isBefore(today)) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "入住日期不能早于当前日期");
     if (!body.checkOut().isAfter(body.checkIn())) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "离店日期必须晚于入住日期");
+    if (body.checkOut().isAfter(body.checkIn().plusDays(366))) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "预订日期范围不能超过 366 天");
+    }
+  }
+
+  private void saveGuestSnapshots(Long userId, Long reservationId, List<Long> guestIds, int guestCount) {
+    if (guestIds == null || guestIds.isEmpty()) return;
+    if (guestIds.size() > guestCount) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "入住人数量不能超过入住人数");
+    }
+    if (new HashSet<>(guestIds).size() != guestIds.size()) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "入住人不能重复选择");
+    }
+    boolean primary = true;
+    for (Long guestId : guestIds) {
+      List<Map<String, Object>> rows = jdbc.queryForList(
+          "SELECT name, gender, phone, id_type idType, id_no_ciphertext ciphertext, id_no_hash idNoHash, id_no_masked idNoMasked "
+              + "FROM guest_profile WHERE id=? AND user_id=? AND deleted_at IS NULL",
+          guestId, userId);
+      if (rows.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "入住人资料不存在");
+      Map<String, Object> guest = rows.getFirst();
+      jdbc.update(
+          "INSERT INTO reservation_guest(reservation_room_id,reservation_id,guest_profile_id,name,gender,phone,id_type,id_no_ciphertext,id_no_hash,id_no_masked,is_primary) "
+              + "VALUES(NULL,?,?,?,?,?,?,?,?,?,?)",
+          reservationId, guestId, guest.get("name"), guest.get("gender"), guest.get("phone"),
+          guest.get("idType"), guest.get("ciphertext"), guest.get("idNoHash"), guest.get("idNoMasked"), primary);
+      primary = false;
+    }
   }
 }

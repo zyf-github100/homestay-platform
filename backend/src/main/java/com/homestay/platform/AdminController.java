@@ -2,6 +2,9 @@ package com.homestay.platform;
 
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.PositiveOrZero;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
@@ -34,8 +37,9 @@ public class AdminController {
   }
 
   public record RoomTypeRequest(@NotBlank String name, String description, @NotBlank String bedType,
-      BigDecimal area, Integer maxGuests, BigDecimal price, String coverImage) {}
-  public record RoomRequest(Long roomTypeId, @NotBlank String roomNo, String floorNo, String status, String remark) {}
+      @PositiveOrZero BigDecimal area, @NotNull @Positive Integer maxGuests,
+      @NotNull @PositiveOrZero BigDecimal price, String coverImage) {}
+  public record RoomRequest(@NotNull Long roomTypeId, @NotBlank String roomNo, String floorNo, String status, String remark) {}
   public record PropertySettingsRequest(@NotBlank String name, String description, @NotBlank String address,
       String phone, String checkInTime, String checkOutTime, String checkInRule, String checkOutRule,
       @NotBlank String status) {}
@@ -73,6 +77,7 @@ public class AdminController {
   public Map<String, Object> updateRoomType(@RequestHeader(value = "Authorization", required = false) String authorization,
       @PathVariable Long id, @Valid @RequestBody RoomTypeRequest body) {
     Long operatorId = session.requirePermission(authorization, "room-type:manage").id();
+    ensureRoomType(id);
     jdbc.update("UPDATE room_type SET name=?,description=?,bed_type=?,area_sqm=?,max_guests=?,base_price=?,cover_image=? WHERE id=?",
         body.name().trim(), body.description(), body.bedType().trim(), body.area(), body.maxGuests(), body.price(), body.coverImage(), id);
     recordAudit(operatorId, "ROOM_TYPE_UPDATE", "ROOM_TYPE", id, "更新房型");
@@ -83,6 +88,7 @@ public class AdminController {
   public Map<String, Object> roomTypeStatus(@RequestHeader(value = "Authorization", required = false) String authorization,
       @PathVariable Long id, @RequestParam String status) {
     Long operatorId = session.requirePermission(authorization, "room-type:manage").id();
+    ensureRoomType(id);
     if (!Set.of("PUBLISHED", "DRAFT").contains(status)) throw badRequest("房型状态不合法");
     jdbc.update("UPDATE room_type SET status=? WHERE id=?", status, id);
     recordAudit(operatorId, "ROOM_TYPE_STATUS", "ROOM_TYPE", id, "更新房型状态: " + status);
@@ -192,10 +198,12 @@ public class AdminController {
   }
 
   @PutMapping("/rooms/{id}")
+  @Transactional
   public Map<String, Object> updateRoom(@RequestHeader(value = "Authorization", required = false) String authorization,
       @PathVariable Long id, @Valid @RequestBody RoomRequest body) {
     Long operatorId = session.requirePermission(authorization, "room:manage").id();
     String status = normalizeRoomStatus(body.status());
+    roomTypeProperty(body.roomTypeId());
     Map<String, Object> current = room(id);
     validateRoomStatus(String.valueOf(current.get("status")), status, id);
     jdbc.update("UPDATE room SET room_type_id=?, room_no=?, floor_no=?, status=?, remark=? WHERE id=?",
@@ -205,6 +213,7 @@ public class AdminController {
   }
 
   @PatchMapping("/rooms/{id}/status")
+  @Transactional
   public Map<String, Object> roomStatus(@RequestHeader(value = "Authorization", required = false) String authorization,
       @PathVariable Long id, @RequestParam String status,
       @RequestParam(required = false, defaultValue = "") String reason) {
@@ -213,6 +222,7 @@ public class AdminController {
   }
 
   @PostMapping("/rooms/{id}/operations")
+  @Transactional
   public Map<String, Object> roomOperation(@RequestHeader(value = "Authorization", required = false) String authorization,
       @PathVariable Long id, @Valid @RequestBody RoomOperationRequest body) {
     Long operatorId = session.requirePermission(authorization, "room:operate").id();

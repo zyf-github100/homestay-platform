@@ -89,4 +89,64 @@ class PaymentServiceTest {
     verify(jdbc).update(contains("UPDATE payment SET status='EXPIRED'"), eq("P-2"));
     verify(jdbc).update(contains("UPDATE reservation SET status='CANCELLED'"), eq(10L));
   }
+
+  @Test
+  void expiryJobCancelsOrdersWhosePaymentWasNeverCreated() {
+    JdbcTemplate jdbc = mock(JdbcTemplate.class);
+    StringRedisTemplate redis = mock(StringRedisTemplate.class);
+    when(jdbc.queryForList(contains("SELECT p.payment_no"))).thenReturn(List.of());
+    when(jdbc.queryForList(contains("SELECT r.id, r.order_no"))).thenReturn(List.of(
+        Map.of("id", 11L, "order_no", "QY-3")));
+    when(jdbc.queryForList(contains("SELECT room_id"), eq("QY-3"))).thenReturn(List.of(
+        Map.of("room_id", 102L, "stay_date", Date.valueOf("2027-01-11"))));
+    when(jdbc.update(contains("UPDATE reservation SET status='CANCELLED'"), eq(11L))).thenReturn(1);
+
+    int expired = new PaymentService(jdbc, redis).expirePendingPayments();
+
+    assertEquals(1, expired);
+    verify(jdbc).update(contains("UPDATE reservation SET status='CANCELLED'"), eq(11L));
+    verify(jdbc).update(contains("DELETE FROM inventory_lock"), eq("QY-3"));
+    verify(redis).delete("homestay:inventory-lock:102:2027-01-11");
+  }
+
+  @Test
+  void cancellingPartiallyPaidOrderRefundsCollectedAmount() {
+    JdbcTemplate jdbc = mock(JdbcTemplate.class);
+    StringRedisTemplate redis = mock(StringRedisTemplate.class);
+    when(jdbc.queryForList(contains("SELECT id, order_no"), eq("QY-4"), eq(7L))).thenReturn(List.of(
+        Map.of("id", 12L, "order_no", "QY-4", "total_amount", new BigDecimal("100.00"),
+            "status", "PENDING_PAYMENT", "payment_status", "PARTIAL")));
+    when(jdbc.queryForList(contains("status='PENDING'"), eq(12L))).thenReturn(List.of());
+    when(jdbc.queryForObject(contains("SUM(amount)"), eq(BigDecimal.class), eq(12L))).thenReturn(new BigDecimal("40.00"));
+    when(jdbc.queryForList(contains("SELECT room_id"), eq("QY-4"))).thenReturn(List.of());
+
+    Map<String, Object> response = new PaymentService(jdbc, redis).cancelReservation("QY-4", 7L);
+    Map<?, ?> data = (Map<?, ?>) response.get("data");
+
+    assertEquals(new BigDecimal("40.00"), data.get("refundAmount"));
+    verify(jdbc).update(contains("UPDATE payment SET status='REFUNDED'"), eq(12L));
+    verify(jdbc).update(contains("UPDATE reservation SET status='CANCELLED', payment_status=?"), eq("REFUNDED"), eq(12L));
+  }
+
+  @Test
+  void cancellingWithinTwentyFourHoursDeductsFirstNight() {
+    JdbcTemplate jdbc = mock(JdbcTemplate.class);
+    StringRedisTemplate redis = mock(StringRedisTemplate.class);
+    when(jdbc.queryForList(contains("SELECT id, order_no"), eq("QY-5"), eq(7L))).thenReturn(List.of(
+        Map.of("id", 13L, "order_no", "QY-5", "total_amount", new BigDecimal("300.00"),
+            "check_in", Date.valueOf(java.time.LocalDate.now(java.time.ZoneOffset.UTC).plusDays(1)),
+            "status", "CONFIRMED", "payment_status", "PAID")));
+    when(jdbc.queryForObject(contains("SUM(amount)"), eq(BigDecimal.class), eq(13L)))
+        .thenReturn(new BigDecimal("300.00"));
+    when(jdbc.queryForObject(contains("unit_price * quantity"), eq(BigDecimal.class), eq(13L)))
+        .thenReturn(new BigDecimal("100.00"));
+    when(jdbc.queryForList(contains("status='PENDING'"), eq(13L))).thenReturn(List.of());
+    when(jdbc.queryForList(contains("SELECT room_id"), eq("QY-5"))).thenReturn(List.of());
+
+    Map<String, Object> response = new PaymentService(jdbc, redis).cancelReservation("QY-5", 7L);
+    Map<?, ?> data = (Map<?, ?>) response.get("data");
+
+    assertEquals(new BigDecimal("100.00"), data.get("cancellationFee"));
+    assertEquals(new BigDecimal("200.00"), data.get("refundAmount"));
+  }
 }

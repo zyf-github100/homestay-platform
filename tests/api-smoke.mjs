@@ -1,5 +1,10 @@
 const base = process.env.API_BASE_URL || 'http://localhost:8080/api/v1'
 const prefix = process.env.TEST_PREFIX || `smoke${Date.now()}`
+const isoDate = (offsetDays) => {
+  const date = new Date()
+  date.setUTCDate(date.getUTCDate() + offsetDays)
+  return date.toISOString().slice(0, 10)
+}
 
 async function request(path, options = {}) {
   const response = await fetch(`${base}${path}`, options)
@@ -29,7 +34,7 @@ try {
   const rooms = await expectStatus('/room-types', 200)
   assert(Array.isArray(rooms.data) && rooms.data.length > 0, 'room-types should return seeded rooms')
   const roomTypeId = rooms.data[0].id
-  const orderBody = JSON.stringify({ checkIn: '2099-01-10', checkOut: '2099-01-12', guests: 2, contactName: '接口测试', contactPhone: '13600000000', items: [{ roomTypeId, quantity: 1 }] })
+  const orderBody = JSON.stringify({ checkIn: isoDate(30), checkOut: isoDate(32), guests: 2, contactName: '接口测试', contactPhone: '13600000000', items: [{ roomTypeId, quantity: 1 }] })
   await expectStatus('/reservations', 401, { method: 'POST', headers: json(), body: orderBody })
 
   const username = `${prefix}user`

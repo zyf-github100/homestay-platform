@@ -51,4 +51,20 @@ class StayServiceTest {
     assertThrows(ResponseStatusException.class, () -> new StayService(jdbc)
         .checkOut("QY-1", 9L, null));
   }
+
+  @Test
+  void addsFolioChargeForActiveOrder() {
+    JdbcTemplate jdbc = mock(JdbcTemplate.class);
+    when(jdbc.queryForList(anyString(), eq("QY-1"))).thenReturn(List.of(
+        Map.of("id", 1L, "order_no", "QY-1", "check_in", Date.valueOf("2027-01-01"),
+            "check_out", Date.valueOf("2027-01-02"), "room_count", 1, "total_amount", new BigDecimal("100.00"),
+            "status", "CHECKED_IN", "payment_status", "PAID")));
+
+    Map<String, Object> response = new StayService(jdbc).addCharge("QY-1", 9L,
+        "MINIBAR", new BigDecimal("18.00"), "饮料");
+
+    assertEquals("0", response.get("code"));
+    verify(jdbc).update(contains("INSERT INTO folio_charge"), eq(1L), eq("MINIBAR"),
+        eq(new BigDecimal("18.00")), eq("饮料"), eq(9L));
+  }
 }

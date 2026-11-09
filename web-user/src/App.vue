@@ -4,8 +4,10 @@ import { computed, nextTick, onMounted, ref } from 'vue'
 const api = import.meta.env.VITE_API_BASE_URL || '/api/v1'
 const menuOpen = ref(false)
 const activeFilter = ref('全部')
-const checkIn = ref('2026-11-14')
-const checkOut = ref('2026-11-16')
+const today = new Date().toISOString().slice(0, 10)
+const addDays = (date, days) => new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10)
+const checkIn = ref(addDays(today, 1))
+const checkOut = ref(addDays(today, 3))
 const guests = ref(2)
 const toast = ref('')
 const loadingRooms = ref(false)
@@ -19,6 +21,8 @@ const currentUser = ref(JSON.parse(localStorage.getItem('homestay_user') || 'nul
 const authDialog = ref(null)
 const bookingDialog = ref(null)
 const selectedRoom = ref(null)
+const bookingQuantity = ref(1)
+const bookingGuestIds = ref([])
 const pendingRoom = ref(null)
 const rooms = ref([])
 const orders = ref([])
@@ -41,6 +45,9 @@ const reviewForm = ref({ orderNo: '', score: 5, content: '' })
 const reviewedOrders = ref(new Set())
 const authForm = ref({ username: '', password: '', displayName: '', phone: '' })
 const bookingForm = ref({ contactName: '', contactPhone: '' })
+const profileBusy = ref(false)
+const profileError = ref('')
+const profileForm = ref({ displayName: '', phone: '' })
 
 const filters = ['全部', '山景房', '溪景房', '整栋包院']
 const filteredRooms = computed(() => activeFilter.value === '全部'
@@ -158,6 +165,9 @@ async function submitAuth() {
         selectedRoom.value = pendingRoom.value
         pendingRoom.value = null
         bookingForm.value = { contactName: currentUser.value?.displayName || '', contactPhone: '' }
+        bookingQuantity.value = 1
+        bookingGuestIds.value = []
+        await loadGuests()
         openDialog(bookingDialog)
       }
     }
@@ -183,7 +193,7 @@ async function searchRooms() {
   notify(`已为你查找 ${checkIn.value} 至 ${checkOut.value} 的房源`)
 }
 
-function reserve(room) {
+async function reserve(room) {
   if (!room.availableCount) {
     notify('这个房型当前没有可售房间')
     return
@@ -195,7 +205,10 @@ function reserve(room) {
   }
   selectedRoom.value = room
   bookingForm.value = { contactName: currentUser.value?.displayName || '', contactPhone: '' }
+  bookingQuantity.value = 1
+  bookingGuestIds.value = []
   bookingError.value = ''
+  await loadGuests()
   openDialog(bookingDialog)
 }
 
@@ -208,7 +221,7 @@ async function submitBooking() {
     const payload = await request('/reservations', {
       method: 'POST',
       headers: userHeaders({ 'Idempotency-Key': idempotencyKey }),
-      body: JSON.stringify({ checkIn: checkIn.value, checkOut: checkOut.value, guests: guests.value, contactName: bookingForm.value.contactName, contactPhone: bookingForm.value.contactPhone, items: [{ roomTypeId: selectedRoom.value.id, quantity: 1 }] })
+      body: JSON.stringify({ checkIn: checkIn.value, checkOut: checkOut.value, guests: guests.value, contactName: bookingForm.value.contactName, contactPhone: bookingForm.value.contactPhone, items: [{ roomTypeId: selectedRoom.value.id, quantity: Number(bookingQuantity.value) }], guestIds: bookingGuestIds.value.map(Number) })
     })
     const orderNo = payload.data.orderNo
     const payment = await request(`/reservations/${orderNo}/payments`, { method: 'POST', headers: userHeaders() })
@@ -265,6 +278,35 @@ async function openPage(nextPage) {
   if (nextPage === 'orders') await loadOrders()
   if (nextPage === 'guests') await loadGuests()
   if (nextPage === 'reviews') await loadOrders()
+  if (nextPage === 'profile') await loadProfile()
+}
+
+async function loadProfile() {
+  profileBusy.value = true
+  profileError.value = ''
+  try {
+    const payload = await request('/auth/me', { headers: userHeaders() })
+    profileForm.value = { displayName: payload.data?.displayName || '', phone: payload.data?.phone || '' }
+  } catch (error) {
+    profileError.value = error.kind === 'network' ? '网络连接失败，请稍后重试' : error.message
+  } finally {
+    profileBusy.value = false
+  }
+}
+
+async function saveProfile() {
+  profileBusy.value = true
+  profileError.value = ''
+  try {
+    const payload = await request('/users/me', { method: 'PUT', headers: userHeaders(), body: JSON.stringify(profileForm.value) })
+    currentUser.value = { ...currentUser.value, ...(payload.data || {}) }
+    localStorage.setItem('homestay_user', JSON.stringify(currentUser.value))
+    notify('个人资料已更新')
+  } catch (error) {
+    profileError.value = error.kind === 'network' ? '网络连接失败，请稍后重试' : error.message
+  } finally {
+    profileBusy.value = false
+  }
 }
 
 async function openOrderDetail(orderNo) {
@@ -317,10 +359,15 @@ async function simulatePayment(result) {
 }
 
 async function cancelOrder(order) {
-  if (!window.confirm(`确定取消订单 ${order.orderNo} 吗？`)) return
   pageBusy.value = true
   pageError.value = ''
   try {
+    const preview = await request(`/reservations/${encodeURIComponent(order.orderNo)}/cancel-preview`, { headers: userHeaders() })
+    if (!preview.data?.allowed) { notify(preview.message || '当前订单不能取消'); return }
+    const fee = Number(preview.data.cancellationFee || 0)
+    const refund = Number(preview.data.refundAmount || 0)
+    const summary = fee > 0 ? `将扣除取消费用 ¥${fee.toLocaleString()}，预计退款 ¥${refund.toLocaleString()}。` : `预计退款 ¥${refund.toLocaleString()}。`
+    if (!window.confirm(`确定取消订单 ${order.orderNo} 吗？\n${summary}`)) return
     const payload = await request(`/reservations/${encodeURIComponent(order.orderNo)}/cancel`, { method: 'POST', headers: userHeaders() })
     cancelResult.value = payload.data || { orderNo: order.orderNo, status: 'CANCELLED' }
     notify(payload.message || '订单已取消')
@@ -424,6 +471,7 @@ onMounted(() => { loadRooms() })
         <button v-if="currentUser" type="button" @click="openPage('orders')">我的订单</button>
         <button v-if="currentUser" type="button" @click="openPage('guests')">房客资料</button>
         <button v-if="currentUser" type="button" @click="openPage('reviews')">我的评价</button>
+        <button v-if="currentUser" type="button" @click="openPage('profile')">个人资料</button>
         <button v-else class="login-link" type="button" @click="showAuth('login')">登录 / 注册</button>
         <button v-if="currentUser" class="login-link" type="button" @click="logout">{{ currentUser.displayName || currentUser.username }} · 退出</button>
       </nav>
@@ -431,14 +479,14 @@ onMounted(() => { loadRooms() })
 
     <main v-if="page === 'home'" id="top">
       <section class="hero" aria-labelledby="hero-title"><div class="hero-copy"><p class="eyebrow">STAY CLOSE TO NATURE</p><h1 id="hero-title">把日子<br /><em>住进风景里。</em></h1><p class="hero-intro">在山与溪之间，留一晚给自己。推开窗是晨雾，晚风里有松木香。</p><a class="text-link" href="#story">探索栖野 <span>↗</span></a></div><div class="hero-note"><span class="note-line"></span><span>浙江 · 莫干山<br />距离城市 1.5 小时</span></div></section>
-      <section class="search-panel" aria-label="查询房源"><form @submit.prevent="searchRooms"><div class="field"><label for="check-in">入住日期</label><input id="check-in" v-model="checkIn" name="checkIn" type="date" required /></div><div class="field"><label for="check-out">离店日期</label><input id="check-out" v-model="checkOut" name="checkOut" type="date" required /></div><div class="field guests-field"><label for="guests">入住人数</label><select id="guests" v-model="guests" name="guests"><option :value="1">1 位成人</option><option :value="2">2 位成人</option><option :value="3">3 位成人</option><option :value="4">4 位成人</option></select></div><button class="search-button" type="submit" :disabled="loadingRooms">{{ loadingRooms ? '查询中…' : '查询房源' }} <span>→</span></button></form></section>
+      <section class="search-panel" aria-label="查询房源"><form @submit.prevent="searchRooms"><div class="field"><label for="check-in">入住日期</label><input id="check-in" v-model="checkIn" name="checkIn" type="date" :min="today" required /></div><div class="field"><label for="check-out">离店日期</label><input id="check-out" v-model="checkOut" name="checkOut" type="date" :min="checkIn" required /></div><div class="field guests-field"><label for="guests">入住人数</label><select id="guests" v-model="guests" name="guests"><option :value="1">1 位成人</option><option :value="2">2 位成人</option><option :value="3">3 位成人</option><option :value="4">4 位成人</option></select></div><button class="search-button" type="submit" :disabled="loadingRooms">{{ loadingRooms ? '查询中…' : '查询房源' }} <span>→</span></button></form></section>
       <section id="rooms" class="section room-section" aria-labelledby="rooms-title"><div class="section-heading"><div><p class="eyebrow">A PLACE TO EXHALE</p><h2 id="rooms-title">住一晚，<br /><em>慢下来。</em></h2></div><p class="section-description">每一间房都朝向风景，保留了木头、阳光和安静。<br />选一处喜欢的角落，剩下的交给时间。</p></div><div class="filter-row" role="tablist" aria-label="房型筛选"><button v-for="filter in filters" :key="filter" type="button" :class="{ active: activeFilter === filter }" role="tab" :aria-selected="activeFilter === filter" @click="activeFilter = filter">{{ filter }}</button><span class="result-count">{{ filteredRooms.length }} 间房型</span></div><div v-if="loadingRooms" class="loading-state" role="status">正在查询可用房型…</div><div v-else-if="!rooms.length" class="empty-state"><strong>暂时没有可用房型</strong><span>请调整入住日期后重新查询。</span></div><div v-else class="room-grid"><article v-for="room in filteredRooms" :key="room.id" class="room-card"><div class="room-image"><img :src="room.image" :alt="room.name" width="640" height="512" loading="lazy" /><span class="room-tag">{{ room.tag }}</span><button class="heart" type="button" :aria-label="`收藏${room.name}`">♡</button></div><div class="room-body"><div><h3>{{ room.name }}</h3><p>{{ room.type }}</p></div><div class="room-price"><strong>¥{{ room.price.toLocaleString() }}</strong><span>/ 晚起</span></div></div><button class="room-cta" type="button" :disabled="!room.availableCount" @click="reserve(room)">{{ room.availableCount ? '立即预订' : '暂时满房' }} <span>↗</span></button></article></div></section>
       <section id="story" class="story-section section"><div class="story-image"><img src="/assets/mountain-dawn.svg" alt="山间小屋与树林" width="800" height="752" loading="lazy" /><span class="vertical-caption">THE ART OF SLOW LIVING</span></div><div class="story-copy"><p class="eyebrow">OUR PHILOSOPHY</p><h2>不赶路，<br /><em>去感受路。</em></h2><p>栖野不是一个“打卡地”。我们把房子藏在山里，让每一次到来都像回到一个久违的朋友家。</p><p>早起听鸟鸣，午后在院子里晒太阳，夜里看一场没有剪辑的星空。</p><a class="outlined-link" href="#journal">读读我们的故事 <span>↗</span></a></div></section>
       <section id="journal" class="journal-section section" aria-labelledby="journal-title"><div class="section-heading compact"><div><p class="eyebrow">FROM THE MOUNTAIN</p><h2 id="journal-title">山野手记</h2></div><a class="text-link" href="#journal">查看全部 <span>↗</span></a></div><div class="journal-grid"><article><div class="journal-icon">☼</div><p class="journal-date">01 / 旅行灵感</p><h3>在莫干山，找到一段不被打扰的时间</h3><a href="#journal">阅读手记 →</a></article><article><div class="journal-icon">⌁</div><p class="journal-date">02 / 栖野日常</p><h3>一杯咖啡的时间，足够看完一场云</h3><a href="#journal">阅读手记 →</a></article><article><div class="journal-icon">✳</div><p class="journal-date">03 / 慢食光</p><h3>跟着当季食材，吃一顿山里的晚餐</h3><a href="#journal">阅读手记 →</a></article></div></section><section class="promise-strip"><p>“愿你每次离开栖野，<br /><em>都比来时更接近自己。”</em></p><span>— 栖野主理人</span></section>
     </main>
 
     <main v-else class="account-shell">
-      <section class="account-hero"><p class="eyebrow">QIYE ACCOUNT</p><h1>{{ page === 'orders' ? '我的订单' : page === 'order-detail' ? '订单详情' : page === 'payment' ? '支付订单' : page === 'guests' ? '房客资料' : page === 'reviews' ? '完成你的评价' : '栖野账户' }}</h1><p>你好，{{ currentUser?.displayName || currentUser?.username }}。你的山野旅程都在这里。</p></section>
+      <section class="account-hero"><p class="eyebrow">QIYE ACCOUNT</p><h1>{{ page === 'orders' ? '我的订单' : page === 'order-detail' ? '订单详情' : page === 'payment' ? '支付订单' : page === 'guests' ? '房客资料' : page === 'reviews' ? '完成你的评价' : page === 'profile' ? '个人资料' : '栖野账户' }}</h1><p>你好，{{ currentUser?.displayName || currentUser?.username }}。你的山野旅程都在这里。</p></section>
       <section class="account-content">
         <div v-if="pageError" class="error-banner" role="alert"><span>{{ pageError }}</span><button type="button" @click="retryPage">重试</button></div>
 
@@ -451,7 +499,7 @@ onMounted(() => { loadRooms() })
 
         <template v-else-if="page === 'order-detail'">
           <div v-if="pageBusy" class="loading-state" role="status">正在加载订单详情…</div>
-          <div v-else-if="orderDetail" class="detail-layout"><div class="detail-main"><div v-if="cancelResult" class="result-banner success-result"><strong>订单已取消</strong><span>{{ cancelResult.refundAmount && Number(cancelResult.refundAmount) > 0 ? `已记录模拟退款 ¥${Number(cancelResult.refundAmount).toLocaleString()}` : '本订单未产生退款' }}</span></div><div class="detail-card"><div class="detail-card-head"><div><p class="eyebrow">ORDER {{ orderDetail.orderNo }}</p><h2>{{ statusLabel(orderDetail.status) }}</h2></div><span class="status-pill" :class="`status-${orderDetail.status.toLowerCase()}`">{{ paymentLabel(orderDetail.paymentStatus) }}</span></div><dl class="detail-grid"><div><dt>入住日期</dt><dd>{{ orderDetail.checkIn }}</dd></div><div><dt>离店日期</dt><dd>{{ orderDetail.checkOut }}</dd></div><div><dt>联系人</dt><dd>{{ orderDetail.contactName }}</dd></div><div><dt>联系电话</dt><dd>{{ orderDetail.contactPhone }}</dd></div><div><dt>入住人数</dt><dd>{{ orderDetail.guests }} 位</dd></div><div><dt>订单金额</dt><dd>¥{{ Number(orderDetail.total).toLocaleString() }}</dd></div></dl></div><div class="detail-card"><h3>房型明细</h3><ul class="detail-list"><li v-for="item in orderDetail.items" :key="item.id"><span>{{ item.roomTypeName }} × {{ item.quantity }}</span><span>¥{{ Number(item.unitPrice).toLocaleString() }} × {{ item.nights }} 晚</span></li></ul></div><div v-if="orderDetail.rooms?.length" class="detail-card"><h3>入住安排</h3><ul class="detail-list"><li v-for="room in orderDetail.rooms" :key="room.reservationRoomId"><span>房间 {{ room.roomNo }}</span><span>{{ room.status }}</span></li></ul></div><div v-if="orderDetail.payments?.length" class="detail-card"><h3>支付记录</h3><ul class="detail-list"><li v-for="payment in orderDetail.payments" :key="payment.paymentNo"><span>{{ payment.paymentNo }} · {{ payment.method }}</span><span>{{ payment.status }} · ¥{{ Number(payment.amount).toLocaleString() }}</span></li></ul></div></div><aside class="detail-aside"><button class="secondary-button full-width" type="button" @click="openPage('orders')">← 返回订单</button><button v-if="orderDetail.status === 'PENDING_PAYMENT'" class="primary-button full-width" type="button" @click="startPayment(orderDetail)">去支付</button><button v-if="['PENDING_PAYMENT','CONFIRMED'].includes(orderDetail.status)" class="danger-button full-width" type="button" @click="cancelOrder(orderDetail)">取消订单</button><button v-if="orderDetail.status === 'COMPLETED' && !reviewedOrders.has(orderDetail.orderNo)" class="secondary-button full-width" type="button" @click="openReview(orderDetail)">评价本次入住</button></aside></div>
+          <div v-else-if="orderDetail" class="detail-layout"><div class="detail-main"><div v-if="cancelResult" class="result-banner success-result"><strong>订单已取消</strong><span>{{ cancelResult.refundAmount && Number(cancelResult.refundAmount) > 0 ? `已记录模拟退款 ¥${Number(cancelResult.refundAmount).toLocaleString()}` : '本订单未产生退款' }}</span></div><div class="detail-card"><div class="detail-card-head"><div><p class="eyebrow">ORDER {{ orderDetail.orderNo }}</p><h2>{{ statusLabel(orderDetail.status) }}</h2></div><span class="status-pill" :class="`status-${orderDetail.status.toLowerCase()}`">{{ paymentLabel(orderDetail.paymentStatus) }}</span></div><dl class="detail-grid"><div><dt>入住日期</dt><dd>{{ orderDetail.checkIn }}</dd></div><div><dt>离店日期</dt><dd>{{ orderDetail.checkOut }}</dd></div><div><dt>联系人</dt><dd>{{ orderDetail.contactName }}</dd></div><div><dt>联系电话</dt><dd>{{ orderDetail.contactPhone }}</dd></div><div><dt>入住人数</dt><dd>{{ orderDetail.guests }} 位</dd></div><div><dt>订单金额</dt><dd>¥{{ Number(orderDetail.total).toLocaleString() }}</dd></div></dl></div><div class="detail-card"><h3>房型明细</h3><ul class="detail-list"><li v-for="item in orderDetail.items" :key="item.id"><span>{{ item.roomTypeName }} × {{ item.quantity }}</span><span>¥{{ Number(item.unitPrice).toLocaleString() }} × {{ item.nights }} 晚</span></li></ul></div><div v-if="orderDetail.rooms?.length" class="detail-card"><h3>入住安排</h3><ul class="detail-list"><li v-for="room in orderDetail.rooms" :key="room.reservationRoomId"><span>房间 {{ room.roomNo }}</span><span>{{ room.status }}</span></li></ul></div><div v-if="orderDetail.guests?.length" class="detail-card"><h3>入住人</h3><ul class="detail-list"><li v-for="guest in orderDetail.guests" :key="guest.id"><span>{{ guest.name }}</span><span>{{ guest.idNoMasked }}</span></li></ul></div><div v-if="orderDetail.charges?.length" class="detail-card"><h3>附加费用</h3><ul class="detail-list"><li v-for="charge in orderDetail.charges" :key="charge.id"><span>{{ charge.type }} · {{ charge.description || "—" }}</span><span>¥{{ Number(charge.amount).toLocaleString() }}</span></li></ul></div><div v-if="orderDetail.payments?.length" class="detail-card"><h3>支付记录</h3><ul class="detail-list"><li v-for="payment in orderDetail.payments" :key="payment.paymentNo"><span>{{ payment.paymentNo }} · {{ payment.method }}</span><span>{{ payment.status }} · ¥{{ Number(payment.amount).toLocaleString() }}</span></li></ul></div></div><aside class="detail-aside"><button class="secondary-button full-width" type="button" @click="openPage('orders')">← 返回订单</button><button v-if="orderDetail.status === 'PENDING_PAYMENT'" class="primary-button full-width" type="button" @click="startPayment(orderDetail)">去支付</button><button v-if="['PENDING_PAYMENT','CONFIRMED'].includes(orderDetail.status)" class="danger-button full-width" type="button" @click="cancelOrder(orderDetail)">取消订单</button><button v-if="orderDetail.status === 'COMPLETED' && !reviewedOrders.has(orderDetail.orderNo)" class="secondary-button full-width" type="button" @click="openReview(orderDetail)">评价本次入住</button></aside></div>
         </template>
 
         <template v-else-if="page === 'payment'">
@@ -464,6 +512,10 @@ onMounted(() => { loadRooms() })
           <form v-if="guestFormOpen" class="inline-form-card" @submit.prevent="saveGuest"><div class="page-heading compact-heading"><div><p class="eyebrow">{{ editingGuestId ? 'UPDATE PROFILE' : 'NEW PROFILE' }}</p><h2>{{ editingGuestId ? '编辑房客' : '新增房客' }}</h2></div><button class="text-button" type="button" @click="guestFormOpen = false">关闭</button></div><div class="form-grid"><label for="guest-name">姓名<input id="guest-name" v-model="guestForm.name" autocomplete="name" required /></label><label for="guest-gender">性别<select id="guest-gender" v-model="guestForm.gender" autocomplete="sex"><option value="">请选择</option><option value="FEMALE">女</option><option value="MALE">男</option><option value="OTHER">其他</option></select></label><label for="guest-phone">手机号<input id="guest-phone" v-model="guestForm.phone" type="tel" autocomplete="tel" /></label><label for="guest-id-type">证件类型<select id="guest-id-type" v-model="guestForm.idType"><option value="ID_CARD">居民身份证</option><option value="PASSPORT">护照</option><option value="OTHER">其他</option></select></label><label for="guest-id-no">{{ editingGuestId ? '更新证件号码（可留空）' : '证件号码' }}<input id="guest-id-no" v-model="guestForm.idNo" inputmode="text" :required="!editingGuestId" :placeholder="editingGuestId ? '留空则保留原证件' : '请输入证件号码'" /></label><label for="guest-remark">备注<textarea id="guest-remark" v-model="guestForm.remark" rows="2" maxlength="255"></textarea></label></div><p v-if="guestError" class="form-error" role="alert">{{ guestError }}</p><button class="primary-button" type="submit" :disabled="guestsBusy">{{ guestsBusy ? '保存中…' : '保存资料' }}</button></form>
         </template>
 
+        <template v-else-if="page === 'profile'">
+          <div class="review-layout"><div class="review-card"><p class="eyebrow">YOUR PROFILE</p><h2>个人资料</h2><form class="review-form" @submit.prevent="saveProfile"><label for="profile-username">账号<input id="profile-username" :value="currentUser?.username" disabled /></label><label for="profile-display-name">姓名<input id="profile-display-name" v-model="profileForm.displayName" required /></label><label for="profile-phone">手机号<input id="profile-phone" v-model="profileForm.phone" type="tel" autocomplete="tel" /></label><p v-if="profileError" class="form-error" role="alert">{{ profileError }}</p><button class="primary-button" type="submit" :disabled="profileBusy">{{ profileBusy ? '保存中…' : '保存资料' }}</button></form></div><aside class="review-help"><h3>账户信息</h3><p>修改后的资料会用于下次预订和订单联系人。</p><button class="secondary-button full-width" type="button" @click="logout">退出登录</button></aside></div>
+        </template>
+
         <template v-else-if="page === 'reviews'">
           <div class="review-layout"><div class="review-card"><p class="eyebrow">YOUR FEEDBACK</p><h2>评价一次入住</h2><p class="review-intro">完成入住后，告诉我们哪些细节让这段旅程更特别。</p><form class="review-form" @submit.prevent="submitReview"><label for="review-order">选择已完成订单<select id="review-order" v-model="reviewForm.orderNo" required><option value="" disabled>请选择订单</option><option v-for="order in completedOrders" :key="order.orderNo" :value="order.orderNo" :disabled="reviewedOrders.has(order.orderNo)">{{ order.orderNo }} · {{ order.checkIn }} → {{ order.checkOut }}{{ reviewedOrders.has(order.orderNo) ? '（已评价）' : '' }}</option></select></label><label for="review-score">评分<select id="review-score" v-model="reviewForm.score"><option :value="5">5 分 · 非常满意</option><option :value="4">4 分 · 满意</option><option :value="3">3 分 · 一般</option><option :value="2">2 分 · 需要改进</option><option :value="1">1 分 · 不满意</option></select></label><label for="review-content">评价内容<textarea id="review-content" v-model="reviewForm.content" rows="5" maxlength="2000" placeholder="分享这次入住的感受"></textarea></label><p v-if="reviewError" class="form-error" role="alert">{{ reviewError }}</p><button class="primary-button" type="submit" :disabled="reviewBusy || !completedOrders.length">{{ reviewBusy ? '提交中…' : '提交评价' }}</button></form></div><aside class="review-help"><h3>还没有可评价的订单</h3><p v-if="!completedOrders.length">订单完成退房后会出现在这里。感谢你把真实体验告诉下一位住客。</p><p v-else>每个已完成订单只能评价一次，提交后无法重复创建。</p><button class="secondary-button full-width" type="button" @click="openPage('orders')">查看我的订单</button></aside></div>
         </template>
@@ -473,7 +525,7 @@ onMounted(() => { loadRooms() })
     <footer v-if="page === 'home'" class="footer"><div class="footer-brand"><span class="brand-mark">栖</span><p>把日子住进风景里。<br /><small>MADE FOR SLOW DAYS.</small></p></div><div class="footer-links"><div><strong>探索</strong><button type="button" @click="page = 'home'; scrollTop()">精选房型</button><a href="#story">关于栖野</a><a href="#journal">山野手记</a></div><div><strong>联系</strong><span>浙江省湖州市德清县</span><span>hello@qiye-stay.com</span><span>+86 572 806 8899</span></div></div><div class="footer-bottom"><span>© 2026 QIYE HOMESTAY</span><span>隐私政策 · 预订须知</span></div></footer>
 
     <dialog ref="authDialog" class="modal" aria-labelledby="auth-title"><div class="modal-card"><button class="modal-close" type="button" aria-label="关闭" @click="closeDialog(authDialog)">×</button><p class="eyebrow">QIYE ACCOUNT</p><h2 id="auth-title">{{ authMode === 'login' ? '欢迎回来' : '加入栖野' }}</h2><p class="modal-intro">{{ authMode === 'login' ? '登录后即可预订房型并查看订单。' : '注册一个账号，保存你的山野旅程。' }}</p><form class="modal-form" @submit.prevent="submitAuth"><label for="auth-username">账号<input id="auth-username" v-model="authForm.username" autocomplete="username" required /></label><label v-if="authMode === 'register'" for="auth-display-name">姓名<input id="auth-display-name" v-model="authForm.displayName" autocomplete="name" required /></label><label v-if="authMode === 'register'" for="auth-phone">手机号<input id="auth-phone" v-model="authForm.phone" type="tel" inputmode="tel" autocomplete="tel" required /></label><label for="auth-password">密码<input id="auth-password" v-model="authForm.password" type="password" :autocomplete="authMode === 'login' ? 'current-password' : 'new-password'" minlength="8" required /></label><p v-if="authError" class="form-error" role="alert">{{ authError }}</p><button class="modal-submit" type="submit" :disabled="authBusy">{{ authBusy ? '处理中…' : authMode === 'login' ? '登录' : '注册' }} <span>→</span></button></form><button class="modal-switch" type="button" @click="authMode = authMode === 'login' ? 'register' : 'login'; authError = ''">{{ authMode === 'login' ? '还没有账号？立即注册' : '已有账号？返回登录' }}</button></div></dialog>
-    <dialog ref="bookingDialog" class="modal" aria-labelledby="booking-title"><div class="modal-card"><button class="modal-close" type="button" aria-label="关闭" @click="closeDialog(bookingDialog)">×</button><p class="eyebrow">YOUR STAY</p><h2 id="booking-title">确认预订</h2><p class="modal-intro">{{ selectedRoom?.name }} · {{ checkIn }} 至 {{ checkOut }}</p><form class="modal-form" @submit.prevent="submitBooking"><label for="contact-name">联系人姓名<input id="contact-name" v-model="bookingForm.contactName" autocomplete="name" required /></label><label for="contact-phone">联系电话<input id="contact-phone" v-model="bookingForm.contactPhone" type="tel" inputmode="tel" autocomplete="tel" required /></label><div class="booking-summary"><span>{{ selectedRoom?.price?.toLocaleString() }} × {{ Math.max(1, Math.round((new Date(checkOut) - new Date(checkIn)) / 86400000)) }} 晚</span><strong>创建订单后进入支付</strong></div><p v-if="bookingError" class="form-error" role="alert">{{ bookingError }}</p><button class="modal-submit" type="submit" :disabled="bookingBusy">{{ bookingBusy ? '正在创建订单…' : '进入支付' }} <span>→</span></button></form></div></dialog>
+    <dialog ref="bookingDialog" class="modal" aria-labelledby="booking-title"><div class="modal-card"><button class="modal-close" type="button" aria-label="关闭" @click="closeDialog(bookingDialog)">×</button><p class="eyebrow">YOUR STAY</p><h2 id="booking-title">确认预订</h2><p class="modal-intro">{{ selectedRoom?.name }} · {{ checkIn }} 至 {{ checkOut }}</p><form class="modal-form" @submit.prevent="submitBooking"><label for="contact-name">联系人姓名<input id="contact-name" v-model="bookingForm.contactName" autocomplete="name" required /></label><label for="contact-phone">联系电话<input id="contact-phone" v-model="bookingForm.contactPhone" type="tel" inputmode="tel" autocomplete="tel" required /></label><label for="booking-quantity">房间数量<input id="booking-quantity" v-model.number="bookingQuantity" type="number" min="1" :max="selectedRoom?.availableCount || 1" required /></label><label v-if="guestsList.length" for="booking-guests">入住人资料<select id="booking-guests" v-model="bookingGuestIds" multiple size="3"><option v-for="guest in guestsList" :key="guest.id" :value="guest.id">{{ guest.name }} · {{ guest.idNoMasked }}</option></select><small>可多选常用入住人，订单会保存当时的资料快照。</small></label><div class="booking-summary"><span>{{ selectedRoom?.price?.toLocaleString() }} × {{ bookingQuantity }} 间 × {{ Math.max(1, Math.round((new Date(checkOut) - new Date(checkIn)) / 86400000)) }} 晚</span><strong>创建订单后进入支付</strong></div><p v-if="bookingError" class="form-error" role="alert">{{ bookingError }}</p><button class="modal-submit" type="submit" :disabled="bookingBusy">{{ bookingBusy ? '正在创建订单…' : '进入支付' }} <span>→</span></button></form></div></dialog>
     <Transition name="toast"><div v-if="toast" class="toast" role="status" aria-live="polite">{{ toast }}</div></Transition>
   </div>
 </template>

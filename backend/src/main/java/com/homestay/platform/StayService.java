@@ -177,6 +177,22 @@ public class StayService {
   }
 
   @Transactional
+  public Map<String, Object> addCharge(String orderNo, Long operatorId, String type,
+      BigDecimal amount, String description) {
+    Map<String, Object> reservation = reservationForUpdate(orderNo);
+    requireStatus(reservation, "PENDING_PAYMENT", "CONFIRMED", "CHECKED_IN", "PARTIALLY_CHECKED_IN", "PARTIALLY_CHECKED_OUT");
+    if (type == null || type.isBlank()) throw badRequest("费用类型不能为空");
+    if (amount == null || amount.signum() <= 0) throw badRequest("费用金额必须大于 0");
+    jdbc.update("INSERT INTO folio_charge(reservation_id,type,amount,description,created_by) VALUES(?,?,?,?,?)",
+        reservation.get("id"), type.trim().toUpperCase(), amount,
+        description == null ? "" : description.trim(), operatorId);
+    recordAudit(operatorId, "FOLIO_CHARGE_ADD", "RESERVATION", orderNo, "SUCCESS", type.trim().toUpperCase());
+    return Map.of("code", "0", "message", "附加费用已登记", "data", Map.of(
+        "orderNo", orderNo, "type", type.trim().toUpperCase(), "amount", amount,
+        "description", description == null ? "" : description.trim()));
+  }
+
+  @Transactional
   public Map<String, Object> checkOut(String orderNo, Long operatorId, List<Long> reservationRoomIds) {
     Map<String, Object> reservation = reservationForUpdate(orderNo);
     requireStatus(reservation, "CHECKED_IN", "PARTIALLY_CHECKED_IN", "PARTIALLY_CHECKED_OUT");
