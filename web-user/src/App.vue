@@ -18,6 +18,8 @@ const bookingError = ref('')
 const authMode = ref('login')
 const authToken = ref(localStorage.getItem('homestay_user_token') || '')
 const currentUser = ref(JSON.parse(localStorage.getItem('homestay_user') || 'null'))
+// Staff accounts continue into the operations console from the same login box.
+const STAFF_ROLES = ['FRONT_DESK', 'OPERATOR', 'OPERATION_ADMIN', 'ADMIN', 'SYSTEM_ADMIN']
 const authDialog = ref(null)
 const bookingDialog = ref(null)
 const selectedRoom = ref(null)
@@ -159,6 +161,12 @@ async function submitAuth() {
       currentUser.value = payload.data.user
       localStorage.setItem('homestay_user_token', authToken.value)
       localStorage.setItem('homestay_user', JSON.stringify(currentUser.value))
+      if (STAFF_ROLES.includes(payload.data.user.role)) {
+        // Same origin, so the operations console picks the session straight up.
+        localStorage.setItem('homestay_admin_token', payload.data.token)
+        window.location.assign('/admin/')
+        return
+      }
       closeDialog(authDialog)
       notify(`欢迎回来，${currentUser.value.displayName || currentUser.value.username}`)
       if (pendingRoom.value) {

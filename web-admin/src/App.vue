@@ -3,6 +3,8 @@ import { computed, nextTick, onMounted, ref } from 'vue'
 
 const api = import.meta.env.VITE_API_BASE_URL || '/api/v1'
 const token = ref(localStorage.getItem('homestay_admin_token') || '')
+// Only staff roles may use this console; everyone else is sent back to the user site.
+const STAFF_ROLES = ['FRONT_DESK', 'OPERATOR', 'OPERATION_ADMIN', 'ADMIN', 'SYSTEM_ADMIN']
 const username = ref('')
 const password = ref('')
 const error = ref('')
@@ -70,6 +72,10 @@ async function login() {
   error.value = ''
   try {
     const payload = await request('/auth/login', { method: 'POST', headers: {}, body: JSON.stringify({ username: username.value, password: password.value }) })
+    if (!STAFF_ROLES.includes(payload.data.user.role)) {
+      error.value = '该账号不是管理端账号，请到用户端登录'
+      return
+    }
     token.value = payload.data.token
     localStorage.setItem('homestay_admin_token', token.value)
     await selectPage('概览')
