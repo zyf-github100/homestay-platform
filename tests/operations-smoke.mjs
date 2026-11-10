@@ -61,6 +61,12 @@ try {
   assert(room, 'an available room without an active assignment is required for room workflow smoke test')
   await expectStatus(`/admin/rooms/${room.id}/operations`, 200, { method: 'POST', headers: auth, body: JSON.stringify({ status: 'AVAILABLE', reason: '接口测试恢复' }) })
 
+  const blockDate = isoDate(new Date(Date.now() + 75 * 86400000))
+  await expectStatus('/admin/inventory/overrides', 200, { method: 'POST', headers: auth, body: JSON.stringify({ roomId: room.id, stayDate: blockDate, reason: '接口测试封房' }) })
+  const blockedCalendar = await expectStatus(`/admin/inventory/calendar?from=${blockDate}&to=${blockDate}`, 200, { headers: auth })
+  assert(blockedCalendar.data.days[0].rooms.some((item) => item.roomId === room.id && item.category === 'BLOCKED'), 'manual inventory block should appear on calendar')
+  await expectStatus(`/admin/inventory/overrides?roomId=${room.id}&stayDate=${blockDate}`, 200, { method: 'DELETE', headers: auth })
+
   const from = new Date(Date.now() + (30 + Math.floor(Math.random() * 30)) * 86400000)
   const to = new Date(from.getTime() + 86400000)
   const iso = (date) => date.toISOString().slice(0, 10)
@@ -68,8 +74,14 @@ try {
   const orderNo = manual.data.orderNo
   assert(manual.data.source === 'MANUAL', 'manual reservation should be marked MANUAL')
   await expectStatus('/admin/payments/collect', 200, { method: 'POST', headers: auth, body: JSON.stringify({ orderNo, amount: Number(manual.data.total), method: 'CASH', remark: '接口测试收款' }) })
+  await expectStatus('/admin/payments/adjust', 200, { method: 'POST', headers: auth, body: JSON.stringify({ orderNo, type: 'DISCOUNT', amount: 1, reason: '接口测试折扣' }) })
+  const charge = await expectStatus(`/admin/reservations/${orderNo}/charges`, 200, { method: 'POST', headers: auth, body: JSON.stringify({ type: 'TEST', amount: 2, description: '接口测试费用' }) })
   const detail = await expectStatus(`/admin/reservations/${orderNo}`, 200, { headers: auth })
   assert(detail.data.paymentStatus === 'PAID', 'manual order should be paid after collection')
+  assert(detail.data.adjustments?.some((item) => item.type === 'DISCOUNT'), 'settlement adjustment should be recorded')
+  const chargeId = detail.data.charges.find((item) => item.type === 'TEST')?.id
+  assert(chargeId, 'test charge should be created')
+  await expectStatus(`/admin/reservations/${orderNo}/charges/${chargeId}/void`, 200, { method: 'POST', headers: auth, body: JSON.stringify({ reason: '接口测试冲正' }) })
   const availableRoom = (await expectStatus('/admin/rooms', 200, { headers: auth })).data.find((item) => item.status === 'AVAILABLE' && item.roomTypeName === roomType.name)
   assert(availableRoom, 'a room of the selected type is required for assignment')
   await expectStatus(`/admin/reservations/${orderNo}/assign-room`, 200, { method: 'POST', headers: auth, body: JSON.stringify({ roomIds: [availableRoom.id] }) })
@@ -79,8 +91,12 @@ try {
   const audit = await expectStatus('/admin/audit-logs?limit=20', 200, { headers: auth })
   assert(audit.data.some((item) => item.action === 'PROPERTY_UPDATE'), 'property update should be audited')
   assert(audit.data.some((item) => item.action === 'RESERVATION_CREATE_MANUAL'), 'manual reservation should be audited')
+  const tasks = await expectStatus('/admin/room-tasks?status=OPEN', 200, { headers: auth })
+  const maintenanceTask = tasks.data.find((item) => item.roomId === room.id && item.taskType === 'MAINTENANCE')
+  assert(maintenanceTask, 'maintenance operation should create a room task')
+  await expectStatus(`/admin/room-tasks/${maintenanceTask.id}`, 200, { method: 'PATCH', headers: auth, body: JSON.stringify({ status: 'DONE', reason: '接口测试完成维修' }) })
 
-  console.log(JSON.stringify({ ok: true, checks: ['property-settings', 'room-type-media', 'room-workflow', 'manual-order', 'collection', 'assignment', 'inventory-calendar', 'audit'] }))
+  console.log(JSON.stringify({ ok: true, checks: ['property-settings', 'room-type-media', 'room-workflow', 'inventory-override', 'manual-order', 'collection', 'settlement-adjustment', 'charge-void', 'assignment', 'housekeeping-task', 'inventory-calendar', 'audit'] }))
 } catch (error) {
   console.error(error.stack || error)
   process.exitCode = 1

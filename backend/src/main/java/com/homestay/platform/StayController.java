@@ -16,16 +16,22 @@ public class StayController {
   private final SessionService session;
   private final StayService stays;
   private final PaymentService payments;
+  private final P0OperationsService operations;
 
   public StayController(SessionService session, StayService stays) {
-    this(session, stays, null);
+    this(session, stays, null, null);
+  }
+
+  public StayController(SessionService session, StayService stays, PaymentService payments) {
+    this(session, stays, payments, null);
   }
 
   @Autowired
-  public StayController(SessionService session, StayService stays, PaymentService payments) {
+  public StayController(SessionService session, StayService stays, PaymentService payments, P0OperationsService operations) {
     this.session = session;
     this.stays = stays;
     this.payments = payments;
+    this.operations = operations;
   }
 
   public record AssignRoomRequest(@NotNull List<Long> roomIds) {}
@@ -34,13 +40,32 @@ public class StayController {
   public record CollectRequest(@NotBlank String orderNo, @NotNull @Positive BigDecimal amount, @NotBlank String method, String remark) {}
   public record ChargeRequest(@NotBlank String type, @NotNull @Positive BigDecimal amount, String description) {}
   public record CheckOutRequest(List<Long> reservationRoomIds) {}
+  public record ReasonRequest(String reason) {}
+  public record PreArrivalRequest(@NotBlank String contactName, @NotBlank String contactPhone, String specialRequest) {}
+  public record SettlementAdjustmentRequest(@NotBlank String orderNo, @NotBlank String type, @NotNull @Positive BigDecimal amount, @NotBlank String reason, String paymentNo) {}
 
   @PostMapping("/reservations/{orderNo}/cancel")
   public Map<String, Object> cancel(
       @PathVariable String orderNo,
+      @RequestBody(required = false) ReasonRequest body,
       @RequestHeader(value = "Authorization", required = false) String authorization) {
     return payments.cancelReservationByOperator(orderNo,
-        session.requirePermission(authorization, "reservation:manage").id());
+        session.requirePermission(authorization, "reservation:manage").id(), body == null ? "前台取消订单" : body.reason());
+  }
+
+  @PostMapping("/reservations/{orderNo}/no-show")
+  public Map<String, Object> noShow(@PathVariable String orderNo,
+      @RequestBody(required = false) ReasonRequest body,
+      @RequestHeader(value = "Authorization", required = false) String authorization) {
+    return operations.markNoShow(orderNo, session.requirePermission(authorization, "reservation:manage").id(), body == null ? null : body.reason());
+  }
+
+  @PatchMapping("/reservations/{orderNo}/pre-arrival")
+  public Map<String, Object> updatePreArrival(@PathVariable String orderNo,
+      @Valid @RequestBody PreArrivalRequest body,
+      @RequestHeader(value = "Authorization", required = false) String authorization) {
+    return operations.updatePreArrival(orderNo, session.requirePermission(authorization, "reservation:manage").id(),
+        body.contactName(), body.contactPhone(), body.specialRequest());
   }
 
   @PostMapping("/reservations/{orderNo}/assign-room")
@@ -89,5 +114,19 @@ public class StayController {
       @RequestHeader(value = "Authorization", required = false) String authorization) {
     return stays.addCharge(orderNo, session.requirePermission(authorization, "payment:collect").id(),
         body.type(), body.amount(), body.description());
+  }
+
+  @PostMapping("/reservations/{orderNo}/charges/{chargeId}/void")
+  public Map<String, Object> voidCharge(@PathVariable String orderNo, @PathVariable Long chargeId,
+      @Valid @RequestBody ReasonRequest body,
+      @RequestHeader(value = "Authorization", required = false) String authorization) {
+    return operations.voidCharge(orderNo, session.requirePermission(authorization, "payment:collect").id(), chargeId, body.reason());
+  }
+
+  @PostMapping("/payments/adjust")
+  public Map<String, Object> adjustSettlement(@Valid @RequestBody SettlementAdjustmentRequest body,
+      @RequestHeader(value = "Authorization", required = false) String authorization) {
+    return operations.adjustSettlement(body.orderNo(), session.requirePermission(authorization, "payment:collect").id(),
+        body.type(), body.amount(), body.reason(), body.paymentNo());
   }
 }

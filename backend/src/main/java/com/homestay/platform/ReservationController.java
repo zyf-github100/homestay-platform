@@ -53,7 +53,7 @@ public class ReservationController {
     try {
       jdbc.update("DELETE FROM inventory_lock WHERE expires_at <= NOW()");
       for (Item item : body.items()) {
-        List<Long> rooms = jdbc.queryForList("SELECT r.id FROM room r WHERE r.room_type_id=? AND r.status='AVAILABLE' AND NOT EXISTS (SELECT 1 FROM inventory_lock l WHERE l.room_id=r.id AND l.stay_date>=? AND l.stay_date<?) LIMIT ?", Long.class, item.roomTypeId(), body.checkIn(), body.checkOut(), item.quantity());
+        List<Long> rooms = jdbc.queryForList("SELECT r.id FROM room r WHERE r.room_type_id=? AND r.status='AVAILABLE' AND NOT EXISTS (SELECT 1 FROM inventory_lock l WHERE l.room_id=r.id AND l.stay_date>=? AND l.stay_date<?) AND NOT EXISTS (SELECT 1 FROM inventory_override o WHERE o.room_id=r.id AND o.stay_date>=? AND o.stay_date<? AND o.status='BLOCKED') LIMIT ?", Long.class, item.roomTypeId(), body.checkIn(), body.checkOut(), body.checkIn(), body.checkOut(), item.quantity());
         if (rooms.size() < item.quantity()) throw new ResponseStatusException(HttpStatus.CONFLICT, "库存不足");
         for (Long roomId : rooms) for (LocalDate date = body.checkIn(); date.isBefore(body.checkOut()); date = date.plusDays(1)) {
           String key = "homestay:inventory-lock:" + roomId + ":" + date;
@@ -70,8 +70,10 @@ public class ReservationController {
             "SELECT rt.base_price FROM room_type rt JOIN property p ON p.id=rt.property_id "
                 + "WHERE rt.id=? AND rt.status='PUBLISHED' AND p.status='OPEN'",
             BigDecimal.class, item.roomTypeId());
-        jdbc.update("INSERT INTO reservation_item(reservation_id,room_type_id,quantity,unit_price,nights) VALUES(?,?,?,?,?)",
-            reservationId, item.roomTypeId(), item.quantity(), unit, nights);
+        Map<String, Object> snapshot = jdbc.queryForMap(
+            "SELECT name, bed_type bedType FROM room_type WHERE id=?", item.roomTypeId());
+        jdbc.update("INSERT INTO reservation_item(reservation_id,room_type_id,quantity,unit_price,nights,room_type_name_snapshot,bed_type_snapshot,cancellation_policy_snapshot) VALUES(?,?,?,?,?,?,?,?)",
+            reservationId, item.roomTypeId(), item.quantity(), unit, nights, snapshot.get("name"), snapshot.get("bedType"), "STANDARD_24H");
       }
       saveGuestSnapshots(user.id(), reservationId, body.guestIds(), body.guests());
       if (idempotencyKey != null) redis.opsForValue().set("homestay:idempotency:reservation:" + idempotencyKey, orderNo, java.time.Duration.ofHours(24));
@@ -117,7 +119,7 @@ public class ReservationController {
     List<Map<String, Object>> orders = jdbc.queryForList("SELECT id, order_no orderNo, contact_name contactName, contact_phone contactPhone, check_in checkIn, check_out checkOut, guests, room_count roomCount, total_amount total, cancellation_policy cancellationPolicy, status, payment_status paymentStatus, created_at createdAt FROM reservation WHERE order_no=? AND user_id=?", orderNo, user.id());
     if (orders.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "订单不存在");
     Map<String, Object> data = new LinkedHashMap<>(orders.getFirst());
-    data.put("items", jdbc.queryForList("SELECT ri.id, rt.name roomTypeName, ri.quantity, ri.unit_price unitPrice, ri.nights FROM reservation_item ri JOIN room_type rt ON rt.id=ri.room_type_id WHERE ri.reservation_id=? ORDER BY ri.id", data.get("id")));
+    data.put("items", jdbc.queryForList("SELECT ri.id, COALESCE(ri.room_type_name_snapshot, rt.name) roomTypeName, COALESCE(ri.bed_type_snapshot, rt.bed_type) bedType, ri.quantity, ri.unit_price unitPrice, ri.nights, ri.cancellation_policy_snapshot cancellationPolicy FROM reservation_item ri LEFT JOIN room_type rt ON rt.id=ri.room_type_id WHERE ri.reservation_id=? ORDER BY ri.id", data.get("id")));
     data.put("rooms", jdbc.queryForList("SELECT rr.id reservationRoomId, r.room_no roomNo, r.room_type_id roomTypeId, rr.status, rr.assigned_at assignedAt, rr.check_in_at checkInAt, rr.check_out_at checkOutAt FROM reservation_room rr JOIN room r ON r.id=rr.room_id WHERE rr.reservation_id=? ORDER BY rr.id", data.get("id")));
     data.put("payments", jdbc.queryForList("SELECT payment_no paymentNo, amount, method, status, paid_at paidAt FROM payment WHERE reservation_id=? ORDER BY id", data.get("id")));
     data.put("charges", jdbc.queryForList("SELECT id, type, amount, description, created_at createdAt FROM folio_charge WHERE reservation_id=? ORDER BY id", data.get("id")));

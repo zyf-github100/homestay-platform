@@ -79,13 +79,15 @@ public class AdminReservationController {
   public Map<String, Object> detail(@PathVariable String orderNo,
       @RequestHeader(value = "Authorization", required = false) String authorization) {
     session.requirePermission(authorization, "reservation:manage");
-    List<Map<String, Object>> orders = jdbc.queryForList("SELECT id, order_no orderNo, contact_name contactName, contact_phone contactPhone, check_in checkIn, check_out checkOut, guests, room_count roomCount, total_amount total, status, payment_status paymentStatus, source, created_at createdAt FROM reservation WHERE order_no=?", orderNo);
+    List<Map<String, Object>> orders = jdbc.queryForList("SELECT id, order_no orderNo, contact_name contactName, contact_phone contactPhone, check_in checkIn, check_out checkOut, guests, room_count roomCount, total_amount total, status, payment_status paymentStatus, cancellation_reason cancellationReason, special_request specialRequest, source, created_at createdAt FROM reservation WHERE order_no=?", orderNo);
     if (orders.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "订单不存在");
     Map<String, Object> data = new java.util.LinkedHashMap<>(orders.getFirst());
-    data.put("items", jdbc.queryForList("SELECT ri.id, rt.name roomTypeName, ri.quantity, ri.unit_price unitPrice, ri.nights FROM reservation_item ri JOIN room_type rt ON rt.id=ri.room_type_id WHERE ri.reservation_id=? ORDER BY ri.id", data.get("id")));
+    data.put("items", jdbc.queryForList("SELECT ri.id, COALESCE(ri.room_type_name_snapshot, rt.name) roomTypeName, COALESCE(ri.bed_type_snapshot, rt.bed_type) bedType, ri.quantity, ri.unit_price unitPrice, ri.nights, ri.cancellation_policy_snapshot cancellationPolicy FROM reservation_item ri LEFT JOIN room_type rt ON rt.id=ri.room_type_id WHERE ri.reservation_id=? ORDER BY ri.id", data.get("id")));
     data.put("rooms", jdbc.queryForList("SELECT rr.id reservationRoomId, r.id roomId, r.room_no roomNo, r.room_type_id roomTypeId, rr.status, rr.assigned_at assignedAt, rr.check_in_at checkInAt, rr.check_out_at checkOutAt FROM reservation_room rr JOIN room r ON r.id=rr.room_id WHERE rr.reservation_id=? ORDER BY rr.id", data.get("id")));
     data.put("payments", jdbc.queryForList("SELECT payment_no paymentNo, amount, method, status, paid_at paidAt FROM payment WHERE reservation_id=? ORDER BY id", data.get("id")));
-    data.put("charges", jdbc.queryForList("SELECT id, type, amount, description, created_at createdAt FROM folio_charge WHERE reservation_id=? ORDER BY id", data.get("id")));
+    data.put("charges", jdbc.queryForList("SELECT id, type, amount, description, status, void_reason voidReason, created_at createdAt FROM folio_charge WHERE reservation_id=? ORDER BY id", data.get("id")));
+    data.put("adjustments", jdbc.queryForList("SELECT id, payment_no paymentNo, type, amount, reason, operator_id operatorId, created_at createdAt FROM payment_adjustment WHERE reservation_id=? ORDER BY id", data.get("id")));
+    data.put("events", jdbc.queryForList("SELECT id, event_type eventType, from_status fromStatus, to_status toStatus, reason, operator_id operatorId, created_at createdAt FROM reservation_event WHERE reservation_id=? ORDER BY id DESC", data.get("id")));
     data.put("guests", jdbc.queryForList("SELECT id, name, gender, phone, id_type idType, id_no_masked idNoMasked, is_primary isPrimary FROM reservation_guest WHERE reservation_id=? ORDER BY id", data.get("id")));
     return Map.of("code", "0", "message", "success", "data", data);
   }

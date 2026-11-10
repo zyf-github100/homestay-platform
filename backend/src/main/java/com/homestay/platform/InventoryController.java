@@ -9,6 +9,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
@@ -22,11 +25,20 @@ public class InventoryController {
 
   private final SessionService session;
   private final JdbcTemplate jdbc;
+  private final P0OperationsService operations;
 
   public InventoryController(SessionService session, JdbcTemplate jdbc) {
+    this(session, jdbc, null);
+  }
+
+  @org.springframework.beans.factory.annotation.Autowired
+  public InventoryController(SessionService session, JdbcTemplate jdbc, P0OperationsService operations) {
     this.session = session;
     this.jdbc = jdbc;
+    this.operations = operations;
   }
+
+  public record OverrideRequest(@NotNull Long roomId, @NotNull LocalDate stayDate, @NotBlank String reason) {}
 
   @GetMapping("/calendar")
   public Map<String, Object> calendar(@RequestParam(required = false) String from,
@@ -49,6 +61,10 @@ public class InventoryController {
       locks.put(key(longValue(row.get("roomId")), date(row.get("stayDate"))),
           row);
     }
+    Map<String, Map<String, Object>> overrides = new HashMap<>();
+    for (Map<String, Object> row : jdbc.queryForList("SELECT room_id roomId, stay_date stayDate, status, reason FROM inventory_override WHERE stay_date>=? AND stay_date<=?", start, end)) {
+      overrides.put(key(longValue(row.get("roomId")), date(row.get("stayDate"))), row);
+    }
 
     Map<Long, List<Map<String, Object>>> occupied = new HashMap<>();
     for (Map<String, Object> row : jdbc.queryForList(
@@ -68,7 +84,7 @@ public class InventoryController {
       List<Map<String, Object>> dayRooms = new ArrayList<>();
       for (Map<String, Object> room : rooms) {
         Long roomId = longValue(room.get("roomId"));
-        String category = category(room, current, locks.get(key(roomId, current)), occupied.get(roomId));
+        String category = category(room, current, locks.get(key(roomId, current)), occupied.get(roomId), overrides.get(key(roomId, current)));
         summary.put(categoryKey(category), summary.get(categoryKey(category)) + 1);
         Map<String, Object> item = new LinkedHashMap<>();
         item.put("roomId", roomId);
@@ -120,8 +136,33 @@ public class InventoryController {
         Map.of("from", start.toString(), "to", end.toString(), "days", days, "roomTypes", roomTypes));
   }
 
+  @GetMapping("/overrides")
+  public Map<String, Object> overrides(@RequestParam(required = false) String from,
+      @RequestParam(required = false) String to,
+      @RequestHeader(value = "Authorization", required = false) String authorization) {
+    session.requirePermission(authorization, "inventory:view");
+    LocalDate start = parse(from, LocalDate.now(ZoneOffset.UTC));
+    LocalDate end = parse(to, start.plusDays(13));
+    return Map.of("code", "0", "message", "success", "data", operations == null ? List.of() : operations.overrides(start, end));
+  }
+
+  @PostMapping("/overrides")
+  public Map<String, Object> block(@Valid @RequestBody OverrideRequest body,
+      @RequestHeader(value = "Authorization", required = false) String authorization) {
+    if (operations == null) throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "库存服务未就绪");
+    return operations.blockInventory(body.roomId(), body.stayDate(), session.requirePermission(authorization, "inventory:manage").id(), body.reason());
+  }
+
+  @DeleteMapping("/overrides")
+  public Map<String, Object> unblock(@RequestParam Long roomId, @RequestParam LocalDate stayDate,
+      @RequestHeader(value = "Authorization", required = false) String authorization) {
+    if (operations == null) throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "库存服务未就绪");
+    return operations.unblockInventory(roomId, stayDate, session.requirePermission(authorization, "inventory:manage").id());
+  }
+
   private String category(Map<String, Object> room, LocalDate date, Map<String, Object> lock,
-      List<Map<String, Object>> stays) {
+      List<Map<String, Object>> stays, Map<String, Object> override) {
+    if (override != null && "BLOCKED".equals(String.valueOf(override.get("status")))) return "BLOCKED";
     String status = String.valueOf(room.get("sourceStatus"));
     if ("MAINTENANCE".equals(status)) return "MAINTENANCE";
     if ("DISABLED".equals(status)) return "DISABLED";
@@ -144,6 +185,7 @@ public class InventoryController {
     summary.put("maintenance", 0);
     summary.put("disabled", 0);
     summary.put("dirty", 0);
+    summary.put("blocked", 0);
     return summary;
   }
 
@@ -154,6 +196,7 @@ public class InventoryController {
       case "MAINTENANCE" -> "maintenance";
       case "DISABLED" -> "disabled";
       case "DIRTY" -> "dirty";
+      case "BLOCKED" -> "blocked";
       default -> "available";
     };
   }

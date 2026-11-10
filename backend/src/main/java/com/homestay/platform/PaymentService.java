@@ -118,7 +118,7 @@ public class PaymentService {
   @Transactional
   public Map<String, Object> cancelReservation(String orderNo, Long userId) {
     Map<String, Object> reservation = reservationForUpdate(orderNo, userId);
-    return cancelReservationInternal(orderNo, userId, reservation);
+    return cancelReservationInternal(orderNo, userId, reservation, "用户主动取消");
   }
 
   public Map<String, Object> cancellationPreview(String orderNo, Long userId) {
@@ -137,12 +137,17 @@ public class PaymentService {
 
   @Transactional
   public Map<String, Object> cancelReservationByOperator(String orderNo, Long operatorId) {
+    return cancelReservationByOperator(orderNo, operatorId, "前台取消订单");
+  }
+
+  @Transactional
+  public Map<String, Object> cancelReservationByOperator(String orderNo, Long operatorId, String reason) {
     Map<String, Object> reservation = reservationForOperatorUpdate(orderNo);
-    return cancelReservationInternal(orderNo, operatorId, reservation);
+    return cancelReservationInternal(orderNo, operatorId, reservation, reason);
   }
 
   private Map<String, Object> cancelReservationInternal(String orderNo, Long operatorId,
-      Map<String, Object> reservation) {
+      Map<String, Object> reservation, String reason) {
     String status = String.valueOf(reservation.get("status"));
     if (!"PENDING_PAYMENT".equals(status) && !"CONFIRMED".equals(status)) {
       throw conflict("当前订单不能取消");
@@ -160,9 +165,17 @@ public class PaymentService {
     if (paid) {
       jdbc.update("UPDATE payment SET status='REFUNDED' WHERE reservation_id=? AND status='SUCCESS'",
           reservation.get("id"));
+      BigDecimal refund = breakdown.refund();
+      if (refund.signum() > 0) {
+        jdbc.update("INSERT INTO payment_adjustment(reservation_id,type,amount,reason,operator_id) VALUES(?, 'REFUND',?,?,?)",
+            reservation.get("id"), refund, reason == null || reason.isBlank() ? "订单取消" : reason.trim(), operatorId);
+      }
     }
     jdbc.update("UPDATE reservation SET status='CANCELLED', payment_status=? WHERE id=?",
         paid ? "REFUNDED" : "CANCELLED", reservation.get("id"));
+    jdbc.update("UPDATE reservation SET cancellation_reason=?, cancelled_by=? WHERE id=?", reason == null ? "订单取消" : reason.trim(), operatorId, reservation.get("id"));
+    jdbc.update("INSERT INTO reservation_event(reservation_id,event_type,from_status,to_status,reason,operator_id) VALUES(?,?,?,?,?,?)",
+        reservation.get("id"), "CANCELLED", status, "CANCELLED", reason == null ? "订单取消" : reason.trim(), operatorId);
     releaseInventory(String.valueOf(reservation.get("order_no")));
     recordAudit(operatorId, "RESERVATION_CANCEL", "RESERVATION", orderNo, "SUCCESS", paid ? "取消并记录模拟退款" : "取消订单");
     return Map.of("code", "0", "message", paid ? "订单已取消，已记录模拟退款" : "订单已取消",
@@ -313,7 +326,11 @@ public class PaymentService {
     BigDecimal collected = jdbc.queryForObject(
         "SELECT COALESCE(SUM(amount),0) FROM payment WHERE reservation_id=? AND status='SUCCESS'",
         BigDecimal.class, reservationId);
-    return collected == null ? BigDecimal.ZERO : collected;
+    BigDecimal adjustments = jdbc.queryForObject(
+        "SELECT COALESCE(SUM(pa.amount),0) FROM payment_adjustment pa WHERE pa.reservation_id=? AND pa.type IN ('REFUND','REVERSAL')",
+        BigDecimal.class, reservationId);
+    return (collected == null ? BigDecimal.ZERO : collected)
+        .subtract(adjustments == null ? BigDecimal.ZERO : adjustments).max(BigDecimal.ZERO);
   }
 
   private ResponseStatusException notFound(String message) {

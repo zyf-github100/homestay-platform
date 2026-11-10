@@ -24,20 +24,26 @@ public class StayService {
   private final JdbcTemplate jdbc;
   private final AuditService audit;
   private final StringRedisTemplate redis;
+  private final P0OperationsService p0;
 
   public StayService(JdbcTemplate jdbc) {
-    this(jdbc, null, null);
+    this(jdbc, null, null, null);
   }
 
   public StayService(JdbcTemplate jdbc, AuditService audit) {
-    this(jdbc, audit, null);
+    this(jdbc, audit, null, null);
+  }
+
+  public StayService(JdbcTemplate jdbc, AuditService audit, StringRedisTemplate redis) {
+    this(jdbc, audit, redis, null);
   }
 
   @Autowired
-  public StayService(JdbcTemplate jdbc, AuditService audit, StringRedisTemplate redis) {
+  public StayService(JdbcTemplate jdbc, AuditService audit, StringRedisTemplate redis, P0OperationsService p0) {
     this.jdbc = jdbc;
     this.audit = audit;
     this.redis = redis;
+    this.p0 = p0;
   }
 
   @Transactional
@@ -80,6 +86,7 @@ public class StayService {
       assigned.add(roomId);
     }
     if (required.values().stream().anyMatch(value -> value != 0)) throw badRequest("订单房型数量与分配结果不一致");
+    event(reservation, "ROOM_ASSIGN", String.valueOf(reservation.get("status")), String.valueOf(reservation.get("status")), "分配房间", operatorId);
     recordAudit(operatorId, "ROOM_ASSIGN", "RESERVATION", orderNo, "SUCCESS", "分配房间");
     return Map.of("code", "0", "message", "分房成功", "data", Map.of("orderNo", orderNo, "roomIds", assigned, "status", "ASSIGNED"));
   }
@@ -107,6 +114,7 @@ public class StayService {
     int checkedIn = jdbc.queryForObject("SELECT COUNT(*) FROM reservation_room WHERE reservation_id=? AND status='CHECKED_IN'", Integer.class, reservation.get("id"));
     String nextStatus = checkedIn >= number(reservation.get("room_count")) ? "CHECKED_IN" : "PARTIALLY_CHECKED_IN";
     jdbc.update("UPDATE reservation SET status=? WHERE id=?", nextStatus, reservation.get("id"));
+    event(reservation, "CHECK_IN", String.valueOf(reservation.get("status")), nextStatus, "办理入住", operatorId);
     recordAudit(operatorId, "CHECK_IN", "RESERVATION", orderNo, "SUCCESS", "办理入住");
     return Map.of("code", "0", "message", "入住办理成功", "data", Map.of("orderNo", orderNo, "status", nextStatus, "checkedInRoomCount", checkedIn));
   }
@@ -150,6 +158,7 @@ public class StayService {
           reservation.get("id"), "ROOM_CHANGE", difference, reason, operatorId);
     }
     recordAudit(operatorId, "ROOM_CHANGE", "RESERVATION", orderNo, "SUCCESS", reason);
+    event(reservation, "ROOM_CHANGE", String.valueOf(reservation.get("status")), String.valueOf(reservation.get("status")), reason, operatorId);
     return Map.of("code", "0", "message", "换房成功", "data", Map.of("orderNo", orderNo, "fromRoomId", current.get("room_id"), "toRoomId", newRoomId, "feeDifference", difference));
   }
 
@@ -171,6 +180,7 @@ public class StayService {
     String nextReservationStatus = "PENDING_PAYMENT".equals(String.valueOf(reservation.get("status"))) && "PAID".equals(paymentStatus)
         ? "CONFIRMED" : String.valueOf(reservation.get("status"));
     jdbc.update("UPDATE reservation SET status=?, payment_status=? WHERE id=?", nextReservationStatus, paymentStatus, reservation.get("id"));
+    event(reservation, "PAYMENT_COLLECT", String.valueOf(reservation.get("status")), nextReservationStatus, "登记线下收款", operatorId);
     confirmInventoryLocks(orderNo);
     recordAudit(operatorId, "PAYMENT_COLLECT", "RESERVATION", orderNo, "SUCCESS", "登记线下收款");
     return Map.of("code", "0", "message", "收款成功", "data", Map.of("paymentNo", paymentNo, "orderNo", orderNo, "amount", amount, "method", method.trim().toUpperCase(), "remark", remark == null ? "" : remark, "collected", nextCollected, "outstanding", due.subtract(nextCollected).max(BigDecimal.ZERO)));
@@ -207,10 +217,12 @@ public class StayService {
       jdbc.update("UPDATE reservation_room SET status='CHECKED_OUT', check_out_at=NOW(), check_out_by=? WHERE id=?", operatorId, room.get("id"));
       jdbc.update("UPDATE room SET status='DIRTY' WHERE id=?", room.get("room_id"));
       jdbc.update("DELETE FROM inventory_lock WHERE order_no=? AND room_id=?", orderNo, room.get("room_id"));
+      if (p0 != null) p0.openTask(longValue(room.get("room_id")), longValue(reservation.get("id")), "HOUSEKEEPING", "退房后待清洁", operatorId);
     }
     int checkedOut = jdbc.queryForObject("SELECT COUNT(*) FROM reservation_room WHERE reservation_id=? AND status='CHECKED_OUT'", Integer.class, reservation.get("id"));
     String nextStatus = checkedOut >= number(reservation.get("room_count")) ? "COMPLETED" : "PARTIALLY_CHECKED_OUT";
     jdbc.update("UPDATE reservation SET status=? WHERE id=?", nextStatus, reservation.get("id"));
+    event(reservation, "CHECK_OUT", String.valueOf(reservation.get("status")), nextStatus, "办理退房", operatorId);
     recordAudit(operatorId, "CHECK_OUT", "RESERVATION", orderNo, "SUCCESS", "办理退房");
     return Map.of("code", "0", "message", "退房结算成功", "data", Map.of("orderNo", orderNo, "status", nextStatus, "checkedOutRoomCount", checkedOut, "settledAmount", totalDue(reservation)));
   }
@@ -240,13 +252,15 @@ public class StayService {
 
   private BigDecimal totalDue(Map<String, Object> reservation) {
     BigDecimal roomTotal = (BigDecimal) reservation.get("total_amount");
-    BigDecimal charges = jdbc.queryForObject("SELECT COALESCE(SUM(amount),0) FROM folio_charge WHERE reservation_id=?", BigDecimal.class, reservation.get("id"));
-    return roomTotal.add(charges == null ? BigDecimal.ZERO : charges);
+    BigDecimal charges = jdbc.queryForObject("SELECT COALESCE(SUM(amount),0) FROM folio_charge WHERE reservation_id=? AND status='ACTIVE'", BigDecimal.class, reservation.get("id"));
+    BigDecimal discounts = jdbc.queryForObject("SELECT COALESCE(SUM(pa.amount),0) FROM payment_adjustment pa WHERE pa.reservation_id=? AND pa.type='DISCOUNT'", BigDecimal.class, reservation.get("id"));
+    return roomTotal.add(charges == null ? BigDecimal.ZERO : charges).subtract(discounts == null ? BigDecimal.ZERO : discounts).max(BigDecimal.ZERO);
   }
 
   private BigDecimal collectedAmount(Map<String, Object> reservation) {
     BigDecimal collected = jdbc.queryForObject("SELECT COALESCE(SUM(amount),0) FROM payment WHERE reservation_id=? AND status='SUCCESS'", BigDecimal.class, reservation.get("id"));
-    return collected == null ? BigDecimal.ZERO : collected;
+    BigDecimal adjustments = jdbc.queryForObject("SELECT COALESCE(SUM(pa.amount),0) FROM payment_adjustment pa WHERE pa.reservation_id=? AND pa.type IN ('REFUND','REVERSAL')", BigDecimal.class, reservation.get("id"));
+    return (collected == null ? BigDecimal.ZERO : collected).subtract(adjustments == null ? BigDecimal.ZERO : adjustments).max(BigDecimal.ZERO);
   }
 
   private void requireStatus(Map<String, Object> reservation, String... allowed) {
@@ -283,6 +297,11 @@ public class StayService {
 
   private void recordAudit(Long operatorId, String action, String resourceType, String resourceId, String result, String detail) {
     if (audit != null) audit.record(operatorId, action, resourceType, resourceId, result, detail);
+  }
+
+  private void event(Map<String, Object> reservation, String type, String from, String to, String reason, Long operatorId) {
+    jdbc.update("INSERT INTO reservation_event(reservation_id,event_type,from_status,to_status,reason,operator_id) VALUES(?,?,?,?,?,?)",
+        reservation.get("id"), type, from, to, reason, operatorId);
   }
 
   private void confirmInventoryLocks(String orderNo) {

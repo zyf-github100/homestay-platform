@@ -53,12 +53,15 @@ public class PropertyController {
                  WHERE l.room_id = r.id
                    AND l.stay_date >= ? AND l.stay_date < ?
                    AND (l.expires_at IS NULL OR l.expires_at > NOW())
+               ) AND NOT EXISTS (
+                 SELECT 1 FROM inventory_override o
+                 WHERE o.room_id = r.id AND o.stay_date >= ? AND o.stay_date < ? AND o.status='BLOCKED'
                ) THEN 1 ELSE 0 END) AS available_count
       FROM room_type rt LEFT JOIN room r ON r.room_type_id = rt.id
       JOIN property p ON p.id = rt.property_id
       WHERE rt.status = 'PUBLISHED' AND p.status = 'OPEN' AND rt.max_guests >= ?
       GROUP BY rt.id ORDER BY rt.id
-      """, start, end, guests);
+      """, start, end, start, end, guests);
     List<Map<String, Object>> rows = new ArrayList<>();
     sourceRows.forEach(source -> {
         Map<String, Object> data = new LinkedHashMap<>(source);

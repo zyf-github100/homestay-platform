@@ -62,8 +62,9 @@ public class AdminReservationService {
         List<Long> rooms = jdbc.queryForList(
             "SELECT r.id FROM room r WHERE r.room_type_id=? AND r.status='AVAILABLE' "
                 + "AND NOT EXISTS (SELECT 1 FROM inventory_lock l WHERE l.room_id=r.id AND l.stay_date>=? AND l.stay_date<?) "
+                + "AND NOT EXISTS (SELECT 1 FROM inventory_override o WHERE o.room_id=r.id AND o.stay_date>=? AND o.stay_date<? AND o.status='BLOCKED') "
                 + "LIMIT ?",
-            Long.class, item.roomTypeId(), checkIn, checkOut, item.quantity());
+            Long.class, item.roomTypeId(), checkIn, checkOut, checkIn, checkOut, item.quantity());
         if (rooms.size() < item.quantity()) throw new ResponseStatusException(HttpStatus.CONFLICT, "库存不足");
         for (Long roomId : rooms) {
           for (LocalDate date = checkIn; date.isBefore(checkOut); date = date.plusDays(1)) {
@@ -82,9 +83,9 @@ public class AdminReservationService {
           items.stream().mapToInt(Item::quantity).sum(), total, operatorId);
       Long reservationId = jdbc.queryForObject("SELECT id FROM reservation WHERE order_no=?", Long.class, orderNo);
       for (Item item : items) {
-        BigDecimal price = jdbc.queryForObject("SELECT base_price FROM room_type WHERE id=?", BigDecimal.class, item.roomTypeId());
-        jdbc.update("INSERT INTO reservation_item(reservation_id,room_type_id,quantity,unit_price,nights) VALUES(?,?,?,?,?)",
-            reservationId, item.roomTypeId(), item.quantity(), price, nights);
+        Map<String, Object> snapshot = jdbc.queryForMap("SELECT base_price price, name, bed_type bedType FROM room_type WHERE id=?", item.roomTypeId());
+        jdbc.update("INSERT INTO reservation_item(reservation_id,room_type_id,quantity,unit_price,nights,room_type_name_snapshot,bed_type_snapshot,cancellation_policy_snapshot) VALUES(?,?,?,?,?,?,?,?)",
+            reservationId, item.roomTypeId(), item.quantity(), snapshot.get("price"), nights, snapshot.get("name"), snapshot.get("bedType"), "STANDARD_24H");
       }
       audit.record(operatorId, "RESERVATION_CREATE_MANUAL", "RESERVATION", orderNo, "SUCCESS", "前台创建人工订单");
       return Map.of("code", "0", "message", "人工订单创建成功", "data",

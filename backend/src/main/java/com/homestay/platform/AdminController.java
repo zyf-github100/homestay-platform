@@ -25,16 +25,22 @@ public class AdminController {
   private final JdbcTemplate jdbc;
   private final SessionService session;
   private final AuditService audit;
+  private final P0OperationsService operations;
 
   public AdminController(JdbcTemplate jdbc, SessionService session) {
-    this(jdbc, session, null);
+    this(jdbc, session, null, null);
+  }
+
+  public AdminController(JdbcTemplate jdbc, SessionService session, AuditService audit) {
+    this(jdbc, session, audit, null);
   }
 
   @Autowired
-  public AdminController(JdbcTemplate jdbc, SessionService session, AuditService audit) {
+  public AdminController(JdbcTemplate jdbc, SessionService session, AuditService audit, P0OperationsService operations) {
     this.jdbc = jdbc;
     this.session = session;
     this.audit = audit;
+    this.operations = operations;
   }
 
   public record RoomTypeRequest(@NotBlank String name, String description, @NotBlank String bedType,
@@ -237,6 +243,9 @@ public class AdminController {
     String currentStatus = String.valueOf(current.get("status"));
     validateRoomStatus(currentStatus, requestedStatus, id);
     jdbc.update("UPDATE room SET status=?, remark=CASE WHEN ?='' THEN remark ELSE ? END WHERE id=?", requestedStatus, reason == null ? "" : reason.trim(), reason == null ? "" : reason.trim(), id);
+    if (operations != null && "MAINTENANCE".equals(requestedStatus)) {
+      operations.openTask(id, null, "MAINTENANCE", reason == null || reason.isBlank() ? "房间报修" : reason.trim(), operatorId);
+    }
     recordAudit(operatorId, "ROOM_STATUS_CHANGE", "ROOM", id, currentStatus + " -> " + requestedStatus + (reason == null || reason.isBlank() ? "" : ": " + reason.trim()));
     return Map.of("code", "0", "message", "房态已更新", "data", Map.of("roomId", id, "status", requestedStatus));
   }
