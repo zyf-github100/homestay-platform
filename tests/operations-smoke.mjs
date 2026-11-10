@@ -79,6 +79,8 @@ try {
   const detail = await expectStatus(`/admin/reservations/${orderNo}`, 200, { headers: auth })
   assert(detail.data.paymentStatus === 'PAID', 'manual order should be paid after collection')
   assert(detail.data.adjustments?.some((item) => item.type === 'DISCOUNT'), 'settlement adjustment should be recorded')
+  const overview = await expectStatus('/admin/statistics/overview', 200, { headers: auth })
+  assert('grossRevenue' in overview.data && 'discounts' in overview.data && 'outstandingAmount' in overview.data, 'statistics should expose net settlement fields')
   const chargeId = detail.data.charges.find((item) => item.type === 'TEST')?.id
   assert(chargeId, 'test charge should be created')
   await expectStatus(`/admin/reservations/${orderNo}/charges/${chargeId}/void`, 200, { method: 'POST', headers: auth, body: JSON.stringify({ reason: '接口测试冲正' }) })
@@ -96,7 +98,7 @@ try {
   assert(maintenanceTask, 'maintenance operation should create a room task')
   await expectStatus(`/admin/room-tasks/${maintenanceTask.id}`, 200, { method: 'PATCH', headers: auth, body: JSON.stringify({ status: 'DONE', reason: '接口测试完成维修' }) })
 
-  console.log(JSON.stringify({ ok: true, checks: ['property-settings', 'room-type-media', 'room-workflow', 'inventory-override', 'manual-order', 'collection', 'settlement-adjustment', 'charge-void', 'assignment', 'housekeeping-task', 'inventory-calendar', 'audit'] }))
+  console.log(JSON.stringify({ ok: true, checks: ['property-settings', 'room-type-media', 'room-workflow', 'inventory-override', 'manual-order', 'collection', 'settlement-adjustment', 'statistics-settlement-fields', 'charge-void', 'assignment', 'housekeeping-task', 'inventory-calendar', 'audit'] }))
 } catch (error) {
   console.error(error.stack || error)
   process.exitCode = 1

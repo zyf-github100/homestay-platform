@@ -2,6 +2,7 @@ package com.homestay.platform;
 
 import java.util.List;
 import java.util.Map;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -12,10 +13,17 @@ import org.springframework.web.server.ResponseStatusException;
 public class ReviewService {
   private final JdbcTemplate jdbc;
   private final AuditService audit;
+  private final NotificationService notifications;
 
   public ReviewService(JdbcTemplate jdbc, AuditService audit) {
+    this(jdbc, audit, null);
+  }
+
+  @Autowired
+  public ReviewService(JdbcTemplate jdbc, AuditService audit, NotificationService notifications) {
     this.jdbc = jdbc;
     this.audit = audit;
+    this.notifications = notifications;
   }
 
   @Transactional
@@ -53,8 +61,13 @@ public class ReviewService {
   @Transactional
   public void reply(Long operatorId, Long id, String reply) {
     if (reply == null || reply.isBlank()) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "回复内容不能为空");
-    int updated = jdbc.update("UPDATE review SET reply=?, replied_by=?, replied_at=NOW() WHERE id=?", reply, operatorId, id);
+    List<Map<String, Object>> reviews = jdbc.queryForList("SELECT r.user_id userId, res.order_no orderNo FROM review r JOIN reservation res ON res.id=r.reservation_id WHERE r.id=?", id);
+    if (reviews.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "评价不存在");
+    int updated = jdbc.update("UPDATE review SET reply=?, replied_by=?, replied_at=NOW() WHERE id=?", reply.trim(), operatorId, id);
     if (updated == 0) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "评价不存在");
+    Map<String, Object> review = reviews.getFirst();
+    if (notifications != null) notifications.create(((Number) review.get("userId")).longValue(), "REVIEW_REPLY", "民宿回复了你的评价",
+        "订单 " + review.get("orderNo") + " 的评价收到了新的回复。", String.valueOf(review.get("orderNo")));
     audit.record(operatorId, "REVIEW_REPLY", "REVIEW", String.valueOf(id), "SUCCESS", "回复评价");
   }
 }

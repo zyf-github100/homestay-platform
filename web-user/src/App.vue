@@ -36,6 +36,9 @@ const cancelResult = ref(null)
 const page = ref('home')
 const pageBusy = ref(false)
 const pageError = ref('')
+const notifications = ref([])
+const notificationUnread = ref(0)
+const notificationsBusy = ref(false)
 const guestsBusy = ref(false)
 const guestFormOpen = ref(false)
 const editingGuestId = ref(null)
@@ -70,8 +73,9 @@ class ApiError extends Error {
 }
 
 function statusLabel(status) {
-  return { PENDING_PAYMENT: '待支付', CONFIRMED: '已确认', CHECKED_IN: '入住中', COMPLETED: '已完成', CANCELLED: '已取消' }[status] || status
+  return { PENDING_PAYMENT: '待支付', CONFIRMED: '已确认', PARTIALLY_CHECKED_IN: '部分入住', CHECKED_IN: '入住中', PARTIALLY_CHECKED_OUT: '部分退房', COMPLETED: '已完成', CANCELLED: '已取消', NO_SHOW: '未入住' }[status] || status
 }
+function formatDate(value) { return value ? new Date(value).toLocaleString('zh-CN', { dateStyle: 'short', timeStyle: 'short' }) : '—' }
 function paymentLabel(status) {
   return { UNPAID: '未支付', PAID: '已支付', CANCELLED: '已取消', REFUNDED: '已退款', FAILED: '支付失败', EXPIRED: '已过期' }[status] || status
 }
@@ -88,6 +92,8 @@ function clearSession(message = '登录状态已过期，请重新登录') {
   authToken.value = ''
   currentUser.value = null
   orders.value = []
+  notifications.value = []
+  notificationUnread.value = 0
   page.value = 'home'
   localStorage.removeItem('homestay_user_token')
   localStorage.removeItem('homestay_user')
@@ -259,6 +265,41 @@ async function loadOrders() {
   }
 }
 
+async function loadNotifications() {
+  if (!authToken.value) return
+  notificationsBusy.value = true
+  try {
+    const payload = await request('/notifications?page=1&size=50', { headers: userHeaders() })
+    notifications.value = payload.data?.data || []
+    notificationUnread.value = Number(payload.data?.unreadCount || 0)
+  } catch (error) {
+    handlePageError(error)
+  } finally {
+    notificationsBusy.value = false
+  }
+}
+
+async function markNotificationRead(notification) {
+  if (notification.readAt) return
+  try {
+    await request(`/notifications/${notification.id}/read`, { method: 'PATCH', headers: userHeaders() })
+    notification.readAt = new Date().toISOString()
+    notificationUnread.value = Math.max(0, notificationUnread.value - 1)
+  } catch (error) {
+    handlePageError(error)
+  }
+}
+
+async function markAllNotificationsRead() {
+  try {
+    await request('/notifications/read-all', { method: 'POST', headers: userHeaders() })
+    notifications.value = notifications.value.map((item) => ({ ...item, readAt: item.readAt || new Date().toISOString() }))
+    notificationUnread.value = 0
+  } catch (error) {
+    handlePageError(error)
+  }
+}
+
 async function loadOrderDetail(orderNo) {
   pageBusy.value = true
   pageError.value = ''
@@ -284,6 +325,7 @@ async function openPage(nextPage) {
     return
   }
   if (nextPage === 'orders') await loadOrders()
+  if (nextPage === 'notifications') await loadNotifications()
   if (nextPage === 'guests') await loadGuests()
   if (nextPage === 'reviews') await loadOrders()
   if (nextPage === 'profile') await loadProfile()
@@ -329,6 +371,7 @@ async function openOrderDetail(orderNo) {
 
 async function retryPage() {
   if (page.value === 'orders' || page.value === 'reviews') return loadOrders()
+  if (page.value === 'notifications') return loadNotifications()
   if (page.value === 'guests') return loadGuests()
   if (page.value === 'order-detail' && orderDetail.value) return loadOrderDetail(orderDetail.value.orderNo)
   if (page.value === 'payment' && selectedPayment.value?.orderNo) return startPayment({ orderNo: selectedPayment.value.orderNo, total: selectedPayment.value.amount })
@@ -356,9 +399,10 @@ async function simulatePayment(result) {
   pageError.value = ''
   try {
     const payload = await request(`/payments/${encodeURIComponent(selectedPayment.value.paymentNo)}/simulate`, { method: 'POST', headers: userHeaders(), body: JSON.stringify({ result }) })
-    selectedPayment.value = { ...selectedPayment.value, ...(payload.data || {}), status: payload.data?.status || (result === 'SUCCESS' ? 'SUCCESS' : 'CANCELLED') }
-    notify(result === 'SUCCESS' ? '支付成功，订单已确认' : '支付未完成，订单已取消')
+    selectedPayment.value = { ...selectedPayment.value, ...(payload.data || {}), status: payload.data?.status || (result === 'SUCCESS' ? 'SUCCESS' : result === 'TIMEOUT' ? 'EXPIRED' : 'CANCELLED') }
+    notify(result === 'SUCCESS' ? '支付成功，订单已确认' : result === 'TIMEOUT' ? '支付已超时，订单已取消' : '支付未完成，订单已取消')
     await loadOrders()
+    await loadNotifications()
   } catch (error) {
     handlePageError(error)
   } finally {
@@ -380,6 +424,7 @@ async function cancelOrder(order) {
     cancelResult.value = payload.data || { orderNo: order.orderNo, status: 'CANCELLED' }
     notify(payload.message || '订单已取消')
     await loadOrders()
+    await loadNotifications()
     if (page.value === 'order-detail') await loadOrderDetail(order.orderNo)
   } catch (error) {
     handlePageError(error)
@@ -466,7 +511,7 @@ async function submitReview() {
   }
 }
 
-onMounted(() => { loadRooms() })
+onMounted(() => { loadRooms(); if (authToken.value) loadNotifications() })
 </script>
 
 <template>
@@ -477,6 +522,7 @@ onMounted(() => { loadRooms() })
       <nav class="nav-links" :class="{ open: menuOpen }" aria-label="主导航">
         <button type="button" @click="page = 'home'; menuOpen = false; scrollTop()">精选房型</button>
         <button v-if="currentUser" type="button" @click="openPage('orders')">我的订单</button>
+        <button v-if="currentUser" type="button" class="notification-link" @click="openPage('notifications')">消息<span v-if="notificationUnread" class="notification-badge">{{ notificationUnread > 99 ? '99+' : notificationUnread }}</span></button>
         <button v-if="currentUser" type="button" @click="openPage('guests')">房客资料</button>
         <button v-if="currentUser" type="button" @click="openPage('reviews')">我的评价</button>
         <button v-if="currentUser" type="button" @click="openPage('profile')">个人资料</button>
@@ -495,7 +541,7 @@ onMounted(() => { loadRooms() })
     </main>
 
     <main v-else class="account-shell">
-      <section class="account-hero"><p class="eyebrow">QIYE ACCOUNT</p><h1>{{ page === 'orders' ? '我的订单' : page === 'order-detail' ? '订单详情' : page === 'payment' ? '支付订单' : page === 'guests' ? '房客资料' : page === 'reviews' ? '完成你的评价' : page === 'profile' ? '个人资料' : '栖野账户' }}</h1><p>你好，{{ currentUser?.displayName || currentUser?.username }}。你的山野旅程都在这里。</p></section>
+      <section class="account-hero"><p class="eyebrow">QIYE ACCOUNT</p><h1>{{ page === 'orders' ? '我的订单' : page === 'order-detail' ? '订单详情' : page === 'payment' ? '支付订单' : page === 'notifications' ? '消息中心' : page === 'guests' ? '房客资料' : page === 'reviews' ? '完成你的评价' : page === 'profile' ? '个人资料' : '栖野账户' }}</h1><p>你好，{{ currentUser?.displayName || currentUser?.username }}。你的山野旅程都在这里。</p></section>
       <section class="account-content">
         <div v-if="pageError" class="error-banner" role="alert"><span>{{ pageError }}</span><button type="button" @click="retryPage">重试</button></div>
 
@@ -506,13 +552,20 @@ onMounted(() => { loadRooms() })
           <div v-if="cancelResult" class="result-banner success-result"><strong>订单已取消</strong><span>{{ cancelResult.refundAmount && Number(cancelResult.refundAmount) > 0 ? `已记录模拟退款 ¥${Number(cancelResult.refundAmount).toLocaleString()}` : '本订单未产生退款' }}</span></div>
         </template>
 
+        <template v-else-if="page === 'notifications'">
+          <div class="page-heading"><div><p class="eyebrow">NOTIFICATION CENTER</p><h2>消息中心</h2><p>订单、支付、入住和评价回复都会在这里留下记录。</p></div><button class="secondary-button" type="button" :disabled="!notificationUnread" @click="markAllNotificationsRead">全部标为已读</button></div>
+          <div v-if="notificationsBusy && !notifications.length" class="loading-state" role="status">正在加载消息…</div>
+          <div v-else-if="!notifications.length" class="empty-state"><strong>还没有新消息</strong><span>完成预订或入住后，重要进度会在这里提醒你。</span></div>
+          <div v-else class="notification-list"><article v-for="notification in notifications" :key="notification.id" class="notification-card" :class="{ unread: !notification.readAt }" role="button" tabindex="0" @click="markNotificationRead(notification)" @keyup.enter="markNotificationRead(notification)"><div class="notification-icon">{{ notification.notificationType === 'PAYMENT_SUCCESS' ? '✓' : notification.notificationType === 'REVIEW_REPLY' ? '↩' : '•' }}</div><div><div class="notification-head"><h3>{{ notification.title }}</h3><time>{{ formatDate(notification.createdAt) }}</time></div><p>{{ notification.content }}</p><small v-if="notification.relatedOrderNo">订单 {{ notification.relatedOrderNo }}</small></div><span v-if="!notification.readAt" class="unread-dot" aria-label="未读"></span></article></div>
+        </template>
+
         <template v-else-if="page === 'order-detail'">
           <div v-if="pageBusy" class="loading-state" role="status">正在加载订单详情…</div>
           <div v-else-if="orderDetail" class="detail-layout"><div class="detail-main"><div v-if="cancelResult" class="result-banner success-result"><strong>订单已取消</strong><span>{{ cancelResult.refundAmount && Number(cancelResult.refundAmount) > 0 ? `已记录模拟退款 ¥${Number(cancelResult.refundAmount).toLocaleString()}` : '本订单未产生退款' }}</span></div><div class="detail-card"><div class="detail-card-head"><div><p class="eyebrow">ORDER {{ orderDetail.orderNo }}</p><h2>{{ statusLabel(orderDetail.status) }}</h2></div><span class="status-pill" :class="`status-${orderDetail.status.toLowerCase()}`">{{ paymentLabel(orderDetail.paymentStatus) }}</span></div><dl class="detail-grid"><div><dt>入住日期</dt><dd>{{ orderDetail.checkIn }}</dd></div><div><dt>离店日期</dt><dd>{{ orderDetail.checkOut }}</dd></div><div><dt>联系人</dt><dd>{{ orderDetail.contactName }}</dd></div><div><dt>联系电话</dt><dd>{{ orderDetail.contactPhone }}</dd></div><div><dt>入住人数</dt><dd>{{ orderDetail.guests }} 位</dd></div><div><dt>订单金额</dt><dd>¥{{ Number(orderDetail.total).toLocaleString() }}</dd></div></dl></div><div class="detail-card"><h3>房型明细</h3><ul class="detail-list"><li v-for="item in orderDetail.items" :key="item.id"><span>{{ item.roomTypeName }} × {{ item.quantity }}</span><span>¥{{ Number(item.unitPrice).toLocaleString() }} × {{ item.nights }} 晚</span></li></ul></div><div v-if="orderDetail.rooms?.length" class="detail-card"><h3>入住安排</h3><ul class="detail-list"><li v-for="room in orderDetail.rooms" :key="room.reservationRoomId"><span>房间 {{ room.roomNo }}</span><span>{{ room.status }}</span></li></ul></div><div v-if="orderDetail.guests?.length" class="detail-card"><h3>入住人</h3><ul class="detail-list"><li v-for="guest in orderDetail.guests" :key="guest.id"><span>{{ guest.name }}</span><span>{{ guest.idNoMasked }}</span></li></ul></div><div v-if="orderDetail.charges?.length" class="detail-card"><h3>附加费用</h3><ul class="detail-list"><li v-for="charge in orderDetail.charges" :key="charge.id"><span>{{ charge.type }} · {{ charge.description || "—" }}</span><span>¥{{ Number(charge.amount).toLocaleString() }}</span></li></ul></div><div v-if="orderDetail.payments?.length" class="detail-card"><h3>支付记录</h3><ul class="detail-list"><li v-for="payment in orderDetail.payments" :key="payment.paymentNo"><span>{{ payment.paymentNo }} · {{ payment.method }}</span><span>{{ payment.status }} · ¥{{ Number(payment.amount).toLocaleString() }}</span></li></ul></div></div><aside class="detail-aside"><button class="secondary-button full-width" type="button" @click="openPage('orders')">← 返回订单</button><button v-if="orderDetail.status === 'PENDING_PAYMENT'" class="primary-button full-width" type="button" @click="startPayment(orderDetail)">去支付</button><button v-if="['PENDING_PAYMENT','CONFIRMED'].includes(orderDetail.status)" class="danger-button full-width" type="button" @click="cancelOrder(orderDetail)">取消订单</button><button v-if="orderDetail.status === 'COMPLETED' && !reviewedOrders.has(orderDetail.orderNo)" class="secondary-button full-width" type="button" @click="openReview(orderDetail)">评价本次入住</button></aside></div>
         </template>
 
         <template v-else-if="page === 'payment'">
-          <div class="payment-layout"><div class="payment-card"><p class="eyebrow">SIMULATED PAYMENT</p><h2>确认支付</h2><p>订单 {{ selectedPayment?.orderNo }} 的模拟支付单已创建。选择结果完成本次演示流程。</p><div class="payment-amount">¥{{ Number(selectedPayment?.amount || 0).toLocaleString() }}</div><dl class="payment-meta"><div><dt>支付单号</dt><dd>{{ selectedPayment?.paymentNo }}</dd></div><div><dt>支付方式</dt><dd>{{ selectedPayment?.method || 'SIMULATED' }}</dd></div><div><dt>状态</dt><dd>{{ paymentStatusLabel }}</dd></div></dl><div v-if="selectedPayment?.status === 'PENDING'" class="payment-actions"><button class="primary-button" type="button" :disabled="paymentBusy" @click="simulatePayment('SUCCESS')">{{ paymentBusy ? '处理中…' : '模拟支付成功' }}</button><button class="secondary-button" type="button" :disabled="paymentBusy" @click="simulatePayment('FAILURE')">模拟支付失败</button><button class="text-button" type="button" :disabled="paymentBusy" @click="simulatePayment('CANCEL')">取消支付</button></div><div v-else class="result-banner" :class="selectedPayment?.status === 'SUCCESS' ? 'success-result' : 'warning-result'"><strong>{{ paymentStatusLabel }}</strong><span>{{ selectedPayment?.status === 'SUCCESS' ? '订单已确认，可以在订单详情中查看。' : '你可以返回订单列表查看最新状态。' }}</span></div></div><aside class="payment-help"><h3>安全提示</h3><p>这是栖野的模拟支付环境，不会收集真实银行卡信息。</p><button class="secondary-button full-width" type="button" @click="openPage('orders')">返回我的订单</button></aside></div>
+          <div class="payment-layout"><div class="payment-card"><p class="eyebrow">SIMULATED PAYMENT</p><h2>确认支付</h2><p>订单 {{ selectedPayment?.orderNo }} 的模拟支付单已创建。选择结果完成本次演示流程。</p><div class="payment-amount">¥{{ Number(selectedPayment?.amount || 0).toLocaleString() }}</div><dl class="payment-meta"><div><dt>支付单号</dt><dd>{{ selectedPayment?.paymentNo }}</dd></div><div><dt>支付方式</dt><dd>{{ selectedPayment?.method || 'SIMULATED' }}</dd></div><div><dt>状态</dt><dd>{{ paymentStatusLabel }}</dd></div></dl><div v-if="selectedPayment?.status === 'PENDING'" class="payment-actions"><button class="primary-button" type="button" :disabled="paymentBusy" @click="simulatePayment('SUCCESS')">{{ paymentBusy ? '处理中…' : '模拟支付成功' }}</button><button class="secondary-button" type="button" :disabled="paymentBusy" @click="simulatePayment('FAILURE')">模拟支付失败</button><button class="text-button" type="button" :disabled="paymentBusy" @click="simulatePayment('CANCEL')">取消支付</button><button class="text-button" type="button" :disabled="paymentBusy" @click="simulatePayment('TIMEOUT')">模拟支付超时</button></div><div v-else class="result-banner" :class="selectedPayment?.status === 'SUCCESS' ? 'success-result' : 'warning-result'"><strong>{{ paymentStatusLabel }}</strong><span>{{ selectedPayment?.status === 'SUCCESS' ? '订单已确认，可以在订单详情中查看。' : '你可以返回订单列表查看最新状态。' }}</span></div></div><aside class="payment-help"><h3>安全提示</h3><p>这是栖野的模拟支付环境，不会收集真实银行卡信息。</p><button class="secondary-button full-width" type="button" @click="openPage('orders')">返回我的订单</button></aside></div>
         </template>
 
         <template v-else-if="page === 'guests'">

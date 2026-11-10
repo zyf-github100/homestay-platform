@@ -24,16 +24,22 @@ public class PaymentService {
   private final JdbcTemplate jdbc;
   private final StringRedisTemplate redis;
   private final AuditService audit;
+  private final NotificationService notifications;
 
   public PaymentService(JdbcTemplate jdbc, StringRedisTemplate redis) {
-    this(jdbc, redis, null);
+    this(jdbc, redis, null, null);
+  }
+
+  public PaymentService(JdbcTemplate jdbc, StringRedisTemplate redis, AuditService audit) {
+    this(jdbc, redis, audit, null);
   }
 
   @Autowired
-  public PaymentService(JdbcTemplate jdbc, StringRedisTemplate redis, AuditService audit) {
+  public PaymentService(JdbcTemplate jdbc, StringRedisTemplate redis, AuditService audit, NotificationService notifications) {
     this.jdbc = jdbc;
     this.redis = redis;
     this.audit = audit;
+    this.notifications = notifications;
   }
 
   @Transactional
@@ -46,7 +52,7 @@ public class PaymentService {
     }
 
     List<Map<String, Object>> existing = jdbc.queryForList(
-        "SELECT p.payment_no, p.amount, p.method, p.status, p.expires_at, r.order_no "
+        "SELECT p.payment_no, p.reservation_id, p.amount, p.method, p.status, p.expires_at, r.order_no, r.user_id "
             + "FROM payment p JOIN reservation r ON r.id=p.reservation_id "
             + "WHERE p.reservation_id=? AND p.status='PENDING' ORDER BY p.id DESC LIMIT 1",
         reservation.get("id"));
@@ -177,6 +183,8 @@ public class PaymentService {
     jdbc.update("INSERT INTO reservation_event(reservation_id,event_type,from_status,to_status,reason,operator_id) VALUES(?,?,?,?,?,?)",
         reservation.get("id"), "CANCELLED", status, "CANCELLED", reason == null ? "订单取消" : reason.trim(), operatorId);
     releaseInventory(String.valueOf(reservation.get("order_no")));
+    if (notifications != null) notifications.create(longValue(reservation.get("user_id")), "ORDER_CANCELLED", "订单已取消",
+        "订单 " + orderNo + " 已取消。" + (paid ? "模拟退款已登记。" : ""), orderNo);
     recordAudit(operatorId, "RESERVATION_CANCEL", "RESERVATION", orderNo, "SUCCESS", paid ? "取消并记录模拟退款" : "取消订单");
     return Map.of("code", "0", "message", paid ? "订单已取消，已记录模拟退款" : "订单已取消",
         "data", Map.of("orderNo", orderNo, "status", "CANCELLED", "refundAmount",
@@ -186,7 +194,7 @@ public class PaymentService {
   @Transactional
   public int expirePendingPayments() {
     List<Map<String, Object>> payments = jdbc.queryForList(
-        "SELECT p.payment_no, p.reservation_id, r.order_no FROM payment p "
+        "SELECT p.payment_no, p.reservation_id, r.order_no, r.user_id FROM payment p "
             + "JOIN reservation r ON r.id=p.reservation_id "
             + "WHERE p.status='PENDING' AND p.expires_at <= NOW() FOR UPDATE");
     for (Map<String, Object> payment : payments) {
@@ -195,10 +203,12 @@ public class PaymentService {
       int cancelled = jdbc.update("UPDATE reservation SET status='CANCELLED', payment_status='EXPIRED' "
               + "WHERE id=? AND status='PENDING_PAYMENT'", payment.get("reservation_id"));
       if (cancelled > 0) releaseInventory(String.valueOf(payment.get("order_no")));
+      if (notifications != null) notifications.create(longValue(payment.get("user_id")), "PAYMENT_EXPIRED", "支付已超时",
+          "订单 " + payment.get("order_no") + " 的支付单已超时，库存已释放。", String.valueOf(payment.get("order_no")));
       recordAudit(null, "PAYMENT_EXPIRE", "PAYMENT", String.valueOf(payment.get("payment_no")), "SUCCESS", "支付超时释放库存");
     }
     List<Map<String, Object>> reservations = jdbc.queryForList(
-        "SELECT r.id, r.order_no FROM reservation r "
+        "SELECT r.id, r.order_no, r.user_id FROM reservation r "
             + "WHERE r.status='PENDING_PAYMENT' "
             + "AND EXISTS (SELECT 1 FROM inventory_lock l WHERE l.order_no=r.order_no "
             + "AND l.expires_at IS NOT NULL AND l.expires_at <= NOW()) "
@@ -212,6 +222,8 @@ public class PaymentService {
         releaseInventory(String.valueOf(reservation.get("order_no")));
         recordAudit(null, "RESERVATION_EXPIRE", "RESERVATION",
             String.valueOf(reservation.get("order_no")), "SUCCESS", "未发起支付，库存锁超时");
+        if (notifications != null) notifications.create(longValue(reservation.get("user_id")), "ORDER_EXPIRED", "订单已关闭",
+            "订单 " + reservation.get("order_no") + " 未在支付有效期内完成支付，库存已释放。", String.valueOf(reservation.get("order_no")));
       }
     }
     return payments.size() + reservations.size();
@@ -274,6 +286,8 @@ public class PaymentService {
     jdbc.update("UPDATE reservation SET status='CONFIRMED', payment_status='PAID' WHERE id=? AND status='PENDING_PAYMENT'",
         payment.get("reservation_id"));
     confirmInventory(String.valueOf(payment.get("order_no")));
+    if (notifications != null) notifications.create(longValue(payment.get("user_id")), "PAYMENT_SUCCESS", "支付成功",
+        "订单 " + payment.get("order_no") + " 已确认，期待你的到来。", String.valueOf(payment.get("order_no")));
   }
 
   private void markCancelled(Map<String, Object> payment, String paymentStatus, String reservationPaymentStatus) {
@@ -282,6 +296,8 @@ public class PaymentService {
     jdbc.update("UPDATE reservation SET status='CANCELLED', payment_status=? WHERE id=? AND status='PENDING_PAYMENT'",
         reservationPaymentStatus, payment.get("reservation_id"));
     releaseInventory(String.valueOf(payment.get("order_no")));
+    if (notifications != null) notifications.create(longValue(payment.get("user_id")), "PAYMENT_CANCELLED", "支付未完成",
+        "订单 " + payment.get("order_no") + " 的支付结果为未完成，订单已取消。", String.valueOf(payment.get("order_no")));
   }
 
   private void confirmInventory(String orderNo) {
@@ -331,6 +347,10 @@ public class PaymentService {
         BigDecimal.class, reservationId);
     return (collected == null ? BigDecimal.ZERO : collected)
         .subtract(adjustments == null ? BigDecimal.ZERO : adjustments).max(BigDecimal.ZERO);
+  }
+
+  private Long longValue(Object value) {
+    return value instanceof Number number ? number.longValue() : value == null ? null : Long.valueOf(String.valueOf(value));
   }
 
   private ResponseStatusException notFound(String message) {

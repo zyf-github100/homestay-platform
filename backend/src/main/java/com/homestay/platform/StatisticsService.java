@@ -32,19 +32,24 @@ public class StatisticsService {
     Integer stayingOrders = jdbc.queryForObject("SELECT COUNT(DISTINCT reservation_id) FROM reservation_room WHERE status='CHECKED_IN'", Integer.class);
     Integer stayingRooms = jdbc.queryForObject("SELECT COUNT(*) FROM reservation_room WHERE status='CHECKED_IN'", Integer.class);
     Integer orderCount = jdbc.queryForObject("SELECT COUNT(*) FROM reservation WHERE DATE(created_at) BETWEEN ? AND ?", Integer.class, range.from, range.to);
-    BigDecimal revenue = jdbc.queryForObject("SELECT COALESCE(SUM(amount),0) FROM payment WHERE status='SUCCESS' AND DATE(paid_at) BETWEEN ? AND ?", BigDecimal.class, range.from, range.to);
-    BigDecimal refunds = jdbc.queryForObject("SELECT COALESCE(SUM(amount),0) FROM payment WHERE status='REFUNDED' AND DATE(updated_at) BETWEEN ? AND ?", BigDecimal.class, range.from, range.to);
+    BigDecimal grossRevenue = jdbc.queryForObject("SELECT COALESCE(SUM(amount),0) FROM payment WHERE status IN ('SUCCESS','REFUNDED') AND DATE(paid_at) BETWEEN ? AND ?", BigDecimal.class, range.from, range.to);
+    BigDecimal refunds = jdbc.queryForObject("SELECT COALESCE(SUM(amount),0) FROM payment_adjustment WHERE type IN ('REFUND','REVERSAL') AND DATE(created_at) BETWEEN ? AND ?", BigDecimal.class, range.from, range.to);
+    BigDecimal discounts = jdbc.queryForObject("SELECT COALESCE(SUM(amount),0) FROM payment_adjustment WHERE type='DISCOUNT' AND DATE(created_at) BETWEEN ? AND ?", BigDecimal.class, range.from, range.to);
+    BigDecimal revenue = money(grossRevenue).subtract(money(refunds)).subtract(money(discounts)).max(BigDecimal.ZERO);
     BigDecimal bookedRevenue = jdbc.queryForObject(
         "SELECT COALESCE(SUM(total_amount * DATEDIFF(LEAST(check_out, ?), GREATEST(check_in, ?)) / NULLIF(DATEDIFF(check_out, check_in), 0)),0) "
             + "FROM reservation WHERE status NOT IN ('CANCELLED','PENDING_PAYMENT') AND check_in < ? AND check_out > ?",
         BigDecimal.class, range.to.plusDays(1), range.from, range.to.plusDays(1), range.from);
     BigDecimal outstandingAmount = jdbc.queryForObject(
-        "SELECT COALESCE(SUM(GREATEST(r.total_amount + COALESCE((SELECT SUM(fc.amount) FROM folio_charge fc WHERE fc.reservation_id=r.id),0) "
-            + "- COALESCE((SELECT SUM(p.amount) FROM payment p WHERE p.reservation_id=r.id AND p.status='SUCCESS'),0), 0)),0) "
+        "SELECT COALESCE(SUM(GREATEST(r.total_amount "
+            + "+ COALESCE((SELECT SUM(fc.amount) FROM folio_charge fc WHERE fc.reservation_id=r.id AND fc.status='ACTIVE'),0) "
+            + "- COALESCE((SELECT SUM(pa.amount) FROM payment_adjustment pa WHERE pa.reservation_id=r.id AND pa.type='DISCOUNT'),0) "
+            + "- COALESCE((SELECT SUM(p.amount) FROM payment p WHERE p.reservation_id=r.id AND p.status IN ('SUCCESS','REFUNDED')),0) "
+            + "+ COALESCE((SELECT SUM(pa.amount) FROM payment_adjustment pa WHERE pa.reservation_id=r.id AND pa.type IN ('REFUND','REVERSAL')),0), 0)),0) "
             + "FROM reservation r WHERE r.status IN ('CONFIRMED','CHECKED_IN','PARTIALLY_CHECKED_IN','PARTIALLY_CHECKED_OUT')",
         BigDecimal.class);
     Integer cancelledOrders = jdbc.queryForObject("SELECT COUNT(*) FROM reservation WHERE status='CANCELLED' AND DATE(updated_at) BETWEEN ? AND ?", Integer.class, range.from, range.to);
-    Integer roomCount = jdbc.queryForObject("SELECT COUNT(*) FROM room WHERE status NOT IN ('MAINTENANCE','DISABLED')", Integer.class);
+    Integer roomCount = jdbc.queryForObject("SELECT COUNT(*) FROM room WHERE status NOT IN ('MAINTENANCE','DISABLED','DIRTY')", Integer.class);
     Integer roomNights = jdbc.queryForObject("SELECT COALESCE(SUM(room_count * DATEDIFF(LEAST(check_out, ?), GREATEST(check_in, ?))),0) FROM reservation WHERE status NOT IN ('CANCELLED','PENDING_PAYMENT') AND check_in < ? AND check_out > ?", Integer.class,
         range.to.plusDays(1), range.from, range.to.plusDays(1), range.from);
     Integer pendingOrders = jdbc.queryForObject("SELECT COUNT(*) FROM reservation WHERE status='PENDING_PAYMENT'", Integer.class);
@@ -59,7 +64,7 @@ public class StatisticsService {
     data.put("todayCheckInOrders", value(todayCheckIns)); data.put("todayCheckInRooms", value(todayCheckInRooms));
     data.put("todayCheckOutOrders", value(todayCheckOuts)); data.put("todayCheckOutRooms", value(todayCheckOutRooms));
     data.put("stayingOrders", value(stayingOrders)); data.put("stayingRooms", value(stayingRooms));
-    data.put("orderCount", value(orderCount)); data.put("revenue", money(revenue)); data.put("refunds", money(refunds));
+    data.put("orderCount", value(orderCount)); data.put("revenue", money(revenue)); data.put("grossRevenue", money(grossRevenue)); data.put("refunds", money(refunds)); data.put("discounts", money(discounts));
     data.put("bookedRevenue", money(bookedRevenue)); data.put("adr", money(adr)); data.put("revpar", money(revpar));
     data.put("outstandingAmount", money(outstandingAmount)); data.put("cancelledOrders", value(cancelledOrders));
     data.put("pendingOrders", value(pendingOrders));
@@ -74,13 +79,28 @@ public class StatisticsService {
     DateRange range = range(from, to);
     Map<String, Map<String, Object>> daily = new LinkedHashMap<>();
     for (LocalDate date = range.from; !date.isAfter(range.to); date = date.plusDays(1)) {
-      Map<String, Object> row = new LinkedHashMap<>(); row.put("date", date.toString()); row.put("orderCount", 0); row.put("revenue", BigDecimal.ZERO); row.put("refunds", BigDecimal.ZERO); row.put("occupiedRooms", 0); row.put("occupancyRate", BigDecimal.ZERO); daily.put(date.toString(), row);
+      Map<String, Object> row = new LinkedHashMap<>(); row.put("date", date.toString()); row.put("orderCount", 0); row.put("revenue", BigDecimal.ZERO); row.put("grossRevenue", BigDecimal.ZERO); row.put("refunds", BigDecimal.ZERO); row.put("discounts", BigDecimal.ZERO); row.put("occupiedRooms", 0); row.put("occupancyRate", BigDecimal.ZERO); daily.put(date.toString(), row);
     }
     List<Map<String, Object>> orders = jdbc.queryForList("SELECT DATE(created_at) day, COUNT(*) orderCount FROM reservation WHERE DATE(created_at) BETWEEN ? AND ? GROUP BY DATE(created_at) ORDER BY day", range.from, range.to);
     for (Map<String, Object> row : orders) { Map<String, Object> target = daily.get(String.valueOf(row.get("day"))); if (target != null) target.put("orderCount", row.get("orderCount")); }
-    List<Map<String, Object>> payments = jdbc.queryForList("SELECT DATE(paid_at) day, COALESCE(SUM(CASE WHEN status='SUCCESS' THEN amount ELSE 0 END),0) revenue, COALESCE(SUM(CASE WHEN status='REFUNDED' THEN amount ELSE 0 END),0) refunds FROM payment WHERE DATE(paid_at) BETWEEN ? AND ? GROUP BY DATE(paid_at) ORDER BY day", range.from, range.to);
-    for (Map<String, Object> row : payments) { Map<String, Object> target = daily.get(String.valueOf(row.get("day"))); if (target != null) { target.put("revenue", money((BigDecimal) row.get("revenue"))); target.put("refunds", money((BigDecimal) row.get("refunds"))); } }
-    Integer activeRooms = jdbc.queryForObject("SELECT COUNT(*) FROM room WHERE status NOT IN ('MAINTENANCE','DISABLED')", Integer.class);
+    List<Map<String, Object>> payments = jdbc.queryForList("SELECT DATE(paid_at) day, COALESCE(SUM(amount),0) grossRevenue FROM payment WHERE status IN ('SUCCESS','REFUNDED') AND DATE(paid_at) BETWEEN ? AND ? GROUP BY DATE(paid_at) ORDER BY day", range.from, range.to);
+    for (Map<String, Object> row : payments) { Map<String, Object> target = daily.get(String.valueOf(row.get("day"))); if (target != null) target.put("grossRevenue", money((BigDecimal) row.get("grossRevenue"))); }
+    List<Map<String, Object>> adjustments = jdbc.queryForList("SELECT DATE(created_at) day, COALESCE(SUM(CASE WHEN type IN ('REFUND','REVERSAL') THEN amount ELSE 0 END),0) refunds, COALESCE(SUM(CASE WHEN type='DISCOUNT' THEN amount ELSE 0 END),0) discounts FROM payment_adjustment WHERE DATE(created_at) BETWEEN ? AND ? GROUP BY DATE(created_at) ORDER BY day", range.from, range.to);
+    for (Map<String, Object> row : adjustments) {
+      Map<String, Object> target = daily.get(String.valueOf(row.get("day")));
+      if (target != null) {
+        BigDecimal refund = money((BigDecimal) row.get("refunds"));
+        BigDecimal discount = money((BigDecimal) row.get("discounts"));
+        target.put("refunds", refund); target.put("discounts", discount);
+      }
+    }
+    for (Map<String, Object> target : daily.values()) {
+      BigDecimal gross = money((BigDecimal) target.get("grossRevenue"));
+      BigDecimal refund = money((BigDecimal) target.get("refunds"));
+      BigDecimal discount = money((BigDecimal) target.get("discounts"));
+      target.put("revenue", money(gross.subtract(refund).subtract(discount).max(BigDecimal.ZERO)));
+    }
+    Integer activeRooms = jdbc.queryForObject("SELECT COUNT(*) FROM room WHERE status NOT IN ('MAINTENANCE','DISABLED','DIRTY')", Integer.class);
     List<Map<String, Object>> occupancy = jdbc.queryForList(
         "SELECT stay_date day, COUNT(DISTINCT room_id) occupiedRooms FROM inventory_lock "
             + "WHERE stay_date BETWEEN ? AND ? AND expires_at IS NULL GROUP BY stay_date ORDER BY day",

@@ -23,9 +23,11 @@ import org.springframework.web.server.ResponseStatusException;
 public class ReservationController {
   private final JdbcTemplate jdbc; private final StringRedisTemplate redis; private final SessionService session; private final PaymentService payments;
   private final AuditService audit;
-  public ReservationController(JdbcTemplate jdbc, StringRedisTemplate redis, SessionService session, PaymentService payments) { this(jdbc, redis, session, payments, null); }
+  private final NotificationService notifications;
+  public ReservationController(JdbcTemplate jdbc, StringRedisTemplate redis, SessionService session, PaymentService payments) { this(jdbc, redis, session, payments, null, null); }
+  public ReservationController(JdbcTemplate jdbc, StringRedisTemplate redis, SessionService session, PaymentService payments, AuditService audit) { this(jdbc, redis, session, payments, audit, null); }
   @Autowired
-  public ReservationController(JdbcTemplate jdbc, StringRedisTemplate redis, SessionService session, PaymentService payments, AuditService audit) { this.jdbc = jdbc; this.redis = redis; this.session = session; this.payments = payments; this.audit = audit; }
+  public ReservationController(JdbcTemplate jdbc, StringRedisTemplate redis, SessionService session, PaymentService payments, AuditService audit, NotificationService notifications) { this.jdbc = jdbc; this.redis = redis; this.session = session; this.payments = payments; this.audit = audit; this.notifications = notifications; }
   public record Item(@NotNull Long roomTypeId, @NotNull @Positive Integer quantity) {}
   public record CreateRequest(@NotNull LocalDate checkIn, @NotNull LocalDate checkOut,
       @NotNull @Positive Integer guests, @NotBlank String contactName,
@@ -78,6 +80,7 @@ public class ReservationController {
       saveGuestSnapshots(user.id(), reservationId, body.guestIds(), body.guests());
       if (idempotencyKey != null) redis.opsForValue().set("homestay:idempotency:reservation:" + idempotencyKey, orderNo, java.time.Duration.ofHours(24));
       if (audit != null) audit.record(user.id(), "RESERVATION_CREATE", "RESERVATION", orderNo, "SUCCESS", "创建订单");
+      if (notifications != null) notifications.create(user.id(), "ORDER_CREATED", "订单已创建", "订单 " + orderNo + " 已创建，请在支付有效期内完成支付。", orderNo);
       return Map.of("code","0","message","订单创建成功","data",Map.of("orderNo",orderNo,"total",pricing.get("total"),"status","PENDING_PAYMENT"));
     } catch (RuntimeException ex) {
       for (String key : lockedKeys) {

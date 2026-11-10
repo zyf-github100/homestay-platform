@@ -25,25 +25,31 @@ public class StayService {
   private final AuditService audit;
   private final StringRedisTemplate redis;
   private final P0OperationsService p0;
+  private final NotificationService notifications;
 
   public StayService(JdbcTemplate jdbc) {
-    this(jdbc, null, null, null);
+    this(jdbc, null, null, null, null);
   }
 
   public StayService(JdbcTemplate jdbc, AuditService audit) {
-    this(jdbc, audit, null, null);
+    this(jdbc, audit, null, null, null);
   }
 
   public StayService(JdbcTemplate jdbc, AuditService audit, StringRedisTemplate redis) {
-    this(jdbc, audit, redis, null);
+    this(jdbc, audit, redis, null, null);
+  }
+
+  public StayService(JdbcTemplate jdbc, AuditService audit, StringRedisTemplate redis, P0OperationsService p0) {
+    this(jdbc, audit, redis, p0, null);
   }
 
   @Autowired
-  public StayService(JdbcTemplate jdbc, AuditService audit, StringRedisTemplate redis, P0OperationsService p0) {
+  public StayService(JdbcTemplate jdbc, AuditService audit, StringRedisTemplate redis, P0OperationsService p0, NotificationService notifications) {
     this.jdbc = jdbc;
     this.audit = audit;
     this.redis = redis;
     this.p0 = p0;
+    this.notifications = notifications;
   }
 
   @Transactional
@@ -116,6 +122,8 @@ public class StayService {
     jdbc.update("UPDATE reservation SET status=? WHERE id=?", nextStatus, reservation.get("id"));
     event(reservation, "CHECK_IN", String.valueOf(reservation.get("status")), nextStatus, "办理入住", operatorId);
     recordAudit(operatorId, "CHECK_IN", "RESERVATION", orderNo, "SUCCESS", "办理入住");
+    if (notifications != null) notifications.create(longValue(reservation.get("user_id")), "CHECK_IN", "入住已办理",
+        "订单 " + orderNo + " 已完成入住登记。", orderNo);
     return Map.of("code", "0", "message", "入住办理成功", "data", Map.of("orderNo", orderNo, "status", nextStatus, "checkedInRoomCount", checkedIn));
   }
 
@@ -224,12 +232,14 @@ public class StayService {
     jdbc.update("UPDATE reservation SET status=? WHERE id=?", nextStatus, reservation.get("id"));
     event(reservation, "CHECK_OUT", String.valueOf(reservation.get("status")), nextStatus, "办理退房", operatorId);
     recordAudit(operatorId, "CHECK_OUT", "RESERVATION", orderNo, "SUCCESS", "办理退房");
+    if (notifications != null) notifications.create(longValue(reservation.get("user_id")), "CHECK_OUT", "退房已完成",
+        "订单 " + orderNo + " 已完成退房结算，感谢入住。", orderNo);
     return Map.of("code", "0", "message", "退房结算成功", "data", Map.of("orderNo", orderNo, "status", nextStatus, "checkedOutRoomCount", checkedOut, "settledAmount", totalDue(reservation)));
   }
 
   private Map<String, Object> reservationForUpdate(String orderNo) {
     List<Map<String, Object>> rows = jdbc.queryForList(
-        "SELECT id, order_no, check_in, check_out, room_count, total_amount, status, payment_status FROM reservation WHERE order_no=? FOR UPDATE",
+        "SELECT id, order_no, user_id, check_in, check_out, room_count, total_amount, status, payment_status FROM reservation WHERE order_no=? FOR UPDATE",
         orderNo);
     if (rows.isEmpty()) throw notFound("订单不存在");
     return rows.getFirst();
